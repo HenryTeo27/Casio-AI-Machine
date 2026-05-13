@@ -1,0 +1,7 @@
+name = "explorer"
+description = "Codebase exploration agent with strict token hygiene."
+
+[defaults]
+read_map_first = "agents/PROJECT_MAP.md"
+max_read_window_lines = 90
+prefer_targeted_search = true

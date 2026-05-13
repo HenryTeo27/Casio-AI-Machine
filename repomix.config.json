@@ -1,0 +1,63 @@
+{
+  "$schema": "https://repomix.com/schemas/latest/schema.json",
+  "output": {
+    "style": "markdown",
+    "compress": true
+  },
+  "include": [
+    "AGENTS.md",
+    "PROJECT_MAP.md",
+    "agents/PROJECT_MAP.md",
+    "agents/**/*.md",
+    "skills/**/*.md",
+    "platformio.ini",
+    "src/**/*.c",
+    "src/**/*.cpp",
+    "src/**/*.h",
+    "src/**/*.hpp",
+    "include/**/*.h",
+    "include/**/*.hpp",
+    "lib/**/*.c",
+    "lib/**/*.cpp",
+    "lib/**/*.h",
+    "lib/**/*.hpp",
+    "test/**/*.c",
+    "test/**/*.cpp",
+    "test/**/*.h",
+    "test/**/*.hpp"
+  ],
+  "ignore": {
+    "useGitignore": true,
+    "customPatterns": [
+      ".git/**",
+      ".pio/**",
+      "build/**",
+      ".vscode/**",
+      "node_modules/**",
+      ".next/**",
+      "dist/**",
+      "out/**",
+      "coverage/**",
+      ".cache/**",
+      "tmp/**",
+      "temp/**",
+      "logs/**",
+      "playwright-report/**",
+      "test-results/**",
+      "*.bin",
+      "*.elf",
+      "*.hex",
+      "*.map",
+      "*.o",
+      "*.a",
+      "*.png",
+      "*.jpg",
+      "*.jpeg",
+      "*.webp",
+      "*.gif",
+      "*.zip",
+      "*.tar",
+      "*.gz"
+    ]
+  }
+}

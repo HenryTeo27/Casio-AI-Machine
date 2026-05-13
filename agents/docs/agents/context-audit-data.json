@@ -1,0 +1,24 @@
+{
+  "generatedAt": "2026-05-14",
+  "notes": "Seed audit for token-heavy areas in Casio-AI-Machine.",
+  "heavyAreas": [
+    {
+      "path": ".pio/",
+      "reason": "PlatformIO generated build tree"
+    },
+    {
+      "path": "build/",
+      "reason": "Generated output tree"
+    }
+  ],
+  "defaultNoFullRead": [
+    ".pio/**",
+    "build/**",
+    "*.bin",
+    "*.elf",
+    "*.hex",
+    "*.map",
+    "*.o",
+    "*.a"
+  ]
+}

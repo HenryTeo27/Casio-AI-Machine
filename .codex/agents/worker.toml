@@ -1,0 +1,7 @@
+name = "worker"
+description = "Implementation agent with bounded edit scope."
+
+[defaults]
+read_map_first = "agents/PROJECT_MAP.md"
+editable_scope = ["agents/**", "skills/**", "src/**", "include/**", "lib/**", "test/**", "AGENTS.md", "PROJECT_MAP.md", ".rgignore", "repomix.config.json", "platformio.ini"]
+avoid_scope = [".pio/**", "build/**"]

@@ -1,0 +1,41 @@
+.git/
+.next/
+node_modules/
+dist/
+out/
+coverage/
+.cache/
+tmp/
+temp/
+logs/
+playwright-report/
+test-results/
+
+# PlatformIO / embedded build artifacts
+.pio/
+build/
+.vscode/
+
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# Binary-heavy assets
+*.bin
+*.elf
+*.hex
+*.map
+*.o
+*.a
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+
+# Lockfiles and generated metadata
+package-lock.json
+pnpm-lock.yaml
+yarn.lock

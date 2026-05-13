@@ -1,0 +1,7 @@
+name = "reviewer"
+description = "Review agent for policy and token-hygiene compliance."
+
+[defaults]
+check_search_scope = true
+check_large_file_reads = true
+check_exclusion_policies = true
