@@ -54,7 +54,7 @@ Button buttons[] = {
   {"Q NEXT", BTN_Q_NEXT},
   {"CAMERA", BTN_CAMERA},
   {"OK", BTN_OK},
-  {"EXTRA", BTN_EXTRA},
+  {"PAGE SWITCH", BTN_EXTRA},
 };
 
 void setup() {

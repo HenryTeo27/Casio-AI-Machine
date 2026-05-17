@@ -113,6 +113,7 @@ enum ScreenMode {
   MODE_CAPTURE,
   MODE_THINKING,
   MODE_CHAT,
+  MODE_STATUS,
   MODE_ERROR
 };
 
@@ -171,6 +172,12 @@ int nextQuestionId = 1;
 bool captureBusy = false;
 bool solveRunning = false;
 bool readyClearSelected = false;
+int pageIndex = 0;  // 0=camera, 1=chat, 2=token/status
+
+bool hasTokenUsage = false;
+int lastPromptTokens = 0;
+int lastCompletionTokens = 0;
+int lastTotalTokens = 0;
 
 String lastError = "";
 
@@ -404,6 +411,28 @@ void drawCaptureScreen() {
   drawTwoLines(boxes, hint);
 }
 
+void drawStatusScreen() {
+  lockState();
+  int pending = (int)pendingPhotos.size();
+  int chatCount = (int)history.size();
+  bool usageReady = hasTokenUsage;
+  int p = lastPromptTokens;
+  int c = lastCompletionTokens;
+  int t = lastTotalTokens;
+  unlockState();
+
+  String line1 = "Token/Status";
+  String line2;
+
+  if (usageReady) {
+    line2 = "T" + String(t) + " P" + String(p) + " C" + String(c);
+  } else {
+    line2 = "T-- P" + String(pending) + " H" + String(chatCount);
+  }
+
+  drawTwoLines(line1, line2);
+}
+
 void renderScreen() {
   switch (screenMode) {
     case MODE_BOOT:
@@ -425,6 +454,10 @@ void renderScreen() {
     case MODE_THINKING:
     case MODE_CHAT:
       drawChatScreen();
+      break;
+
+    case MODE_STATUS:
+      drawStatusScreen();
       break;
 
     case MODE_ERROR:
@@ -761,6 +794,35 @@ bool requestSolveFromServer(
   const char* displayText = resp["display_text"] | nullptr;
   const char* answer = resp["answer"] | nullptr;
 
+  JsonVariant usage = resp["usage"];
+  int promptTokens = -1;
+  int completionTokens = -1;
+  int totalTokens = -1;
+
+  if (!usage.isNull()) {
+    if (usage["prompt_tokens"].is<int>()) promptTokens = usage["prompt_tokens"].as<int>();
+    else if (usage["input_tokens"].is<int>()) promptTokens = usage["input_tokens"].as<int>();
+
+    if (usage["completion_tokens"].is<int>()) completionTokens = usage["completion_tokens"].as<int>();
+    else if (usage["output_tokens"].is<int>()) completionTokens = usage["output_tokens"].as<int>();
+
+    if (usage["total_tokens"].is<int>()) totalTokens = usage["total_tokens"].as<int>();
+  }
+
+  if (promptTokens < 0 && resp["prompt_tokens"].is<int>()) promptTokens = resp["prompt_tokens"].as<int>();
+  if (completionTokens < 0 && resp["completion_tokens"].is<int>()) completionTokens = resp["completion_tokens"].as<int>();
+  if (totalTokens < 0 && resp["total_tokens"].is<int>()) totalTokens = resp["total_tokens"].as<int>();
+  if (totalTokens < 0 && promptTokens >= 0 && completionTokens >= 0) totalTokens = promptTokens + completionTokens;
+
+  if (promptTokens >= 0 || completionTokens >= 0 || totalTokens >= 0) {
+    lockState();
+    hasTokenUsage = true;
+    lastPromptTokens = max(0, promptTokens);
+    lastCompletionTokens = max(0, completionTokens);
+    lastTotalTokens = max(0, totalTokens);
+    unlockState();
+  }
+
   if (displayText && strlen(displayText) > 0) {
     outAnswer = String(displayText);
   } else if (answer && strlen(answer) > 0) {
@@ -862,6 +924,7 @@ void solveTask(void* param) {
   }
 
   solveRunning = false;
+  pageIndex = 1;
   screenMode = MODE_CHAT;
 
   unlockState();
@@ -981,6 +1044,7 @@ void prevQuestion() {
 
   unlockState();
 
+  pageIndex = 1;
   screenMode = history.empty() ? MODE_READY : MODE_CHAT;
 }
 
@@ -999,7 +1063,31 @@ void nextQuestion() {
 
   unlockState();
 
+  pageIndex = 1;
   screenMode = history.empty() ? MODE_READY : MODE_CHAT;
+}
+
+void cyclePageWithExtraButton() {
+  if (screenMode == MODE_BOOT || screenMode == MODE_ERROR) return;
+  if (captureBusy || solveRunning) return;
+
+  pageIndex = (pageIndex + 1) % 3;
+  readyClearSelected = false;
+
+  if (pageIndex == 0) {
+    lockState();
+    bool hasPending = !pendingPhotos.empty();
+    unlockState();
+    screenMode = hasPending ? MODE_CAPTURE : MODE_READY;
+    return;
+  }
+
+  if (pageIndex == 1) {
+    screenMode = MODE_CHAT;
+    return;
+  }
+
+  screenMode = MODE_STATUS;
 }
 
 void cameraButtonAction() {
@@ -1011,6 +1099,7 @@ void cameraButtonAction() {
 
   if (solveRunning || captureBusy) return;
 
+  pageIndex = 0;
   capturePhoto();
 }
 
@@ -1070,6 +1159,7 @@ void setup() {
   u8g2.enableUTF8Print();
 
   screenMode = MODE_BOOT;
+  pageIndex = 0;
   renderScreen();
 
   delay(1000);
@@ -1086,6 +1176,7 @@ void setup() {
   connectWiFi();
 
   screenMode = MODE_READY;
+  pageIndex = 0;
   readyClearSelected = false;
 
   renderScreen();
@@ -1128,7 +1219,7 @@ void loop() {
 
   if (btnExtra.fell()) {
     Serial.println("BTN EXTRA");
-    // 之后这里可以做：model page / token page / settings page
+    cyclePageWithExtraButton();
   }
 
   renderScreen();

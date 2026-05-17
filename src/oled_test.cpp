@@ -7,6 +7,8 @@ static constexpr int OLED_SCL = 2;
 static constexpr int OLED_RST = 47;
 
 U8G2_SSD1305_128X32_NONAME_F_HW_I2C u8g2(U8G2_R0, OLED_RST);
+// If your panel is SSD1309, try this constructor instead:
+// U8G2_SSD1309_128X32_UNIVISION_F_HW_I2C u8g2(U8G2_R0, OLED_RST);
 
 void drawTwoLines(const String& line1, const String& line2) {
   u8g2.clearBuffer();
@@ -39,6 +41,22 @@ void drawContrastBars() {
   u8g2.sendBuffer();
 }
 
+void scanI2C() {
+  Serial.println("[INFO] Scanning I2C bus...");
+  int found = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    uint8_t err = Wire.endTransmission();
+    if (err == 0) {
+      Serial.printf("[I2C] device at 0x%02X\n", addr);
+      found++;
+    }
+  }
+  if (found == 0) {
+    Serial.println("[I2C] no devices found");
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(600);
@@ -47,14 +65,19 @@ void setup() {
 
   Wire.begin(OLED_SDA, OLED_SCL);
   Wire.setClock(400000);
+  scanI2C();
 
+  // Try 0x3C first. If no display, switch to 0x3D:
+  // u8g2.setI2CAddress(0x3D * 2);
   u8g2.setI2CAddress(0x3C * 2);
   u8g2.begin();
+  u8g2.setPowerSave(0);
   u8g2.enableUTF8Print();
   u8g2.setContrast(30);
 
   drawTwoLines("OLED Test", "SSD1305 128x32");
   Serial.println("[OK] OLED initialized");
+  Serial.println("[INFO] If still black: try 0x3D and SSD1309 constructor.");
   delay(1200);
 }
 
