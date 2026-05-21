@@ -98,7 +98,25 @@
 {
   "ok": true,
   "answer": "完整回答（可较长）",
-  "display_text": "为 128x32 OLED 压缩后的文本",
+  "display_text": "文本预览（兼容字段）",
+  "display_blocks": [
+    {
+      "type": "bitmap",
+      "kind": "text",
+      "width": 128,
+      "height": 32,
+      "format": "1bit_xbm",
+      "data": "base64..."
+    },
+    {
+      "type": "bitmap",
+      "kind": "formula",
+      "width": 360,
+      "height": 32,
+      "format": "1bit_xbm",
+      "data": "base64..."
+    }
+  ],
   "usage": {
     "input_tokens": 123,
     "output_tokens": 456,
@@ -122,6 +140,18 @@
 - 服务器端固定模型：`gpt-5.4-nano`
 - 设备端不控制模型
 - 以后换模型：仅改服务器代码，不改设备
+
+---
+
+## 5.1) 渲染策略（当前）
+
+- 服务器把 AI 回答拆成 `blocks`（text/formula）
+- 服务器把 text 与 formula 都渲染成 `1-bit bitmap`
+- ESP32 只做：
+  - base64 解码
+  - OLED 绘制
+  - 上下切换 block
+  - 左右横向滚动（超宽公式）
 
 ---
 

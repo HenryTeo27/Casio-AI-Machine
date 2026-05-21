@@ -2,13 +2,13 @@
 
 static constexpr int BTN_PAGE_UP = 14;
 static constexpr int BTN_PAGE_DOWN = 21;
-static constexpr int BTN_Q_PREV = 38;
-static constexpr int BTN_Q_NEXT = 39;
-static constexpr int BTN_CAMERA = 40;
-static constexpr int BTN_OK = 41;
+static constexpr int BTN_Q_PREV = 40;
+static constexpr int BTN_Q_NEXT = 41;
+static constexpr int BTN_CAMERA = 38;
+static constexpr int BTN_OK = 39;
 static constexpr int BTN_EXTRA = 42;
 
-static constexpr unsigned long DEBOUNCE_MS = 180;
+static constexpr unsigned long DEBOUNCE_MS = 35;
 
 struct Button {
   const char* name;
@@ -35,7 +35,7 @@ struct Button {
       lastChange = millis();
     }
 
-    if ((millis() - lastChange) > DEBOUNCE_MS && reading != lastStable) {
+    if ((millis() - lastChange) >= DEBOUNCE_MS && reading != lastStable) {
       lastStable = reading;
       if (lastStable == LOW) {
         count++;
