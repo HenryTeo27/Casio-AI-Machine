@@ -2,7 +2,6 @@
 
 An ESP32-powered AI learning machine built inside a `CASIO FX-560MS` calculator body.
 
-![Front View](assets/front-v2-casio.jpg)
 ![No Cover View](assets/non-cover-v2-casio.jpg)
 ![Demo 1](assets/demo1.jpg)
 ![Demo 2](assets/demo2.jpg)
