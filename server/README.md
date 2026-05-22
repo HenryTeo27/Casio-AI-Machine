@@ -4,7 +4,7 @@ Create your own Next.js TypeScript backend, then copy the relevant API routes, u
 
 This folder is a direct reference copy of the Casio AI Machine backend pieces from:
 
-`C:\Users\User\project\EstateBoostCopilot\general`
+`EstateBoostCopilot/general` (source project path)
 
 It is intended for open-source migration/reference. Sensitive values, URLs, project-specific aliases, and deployment settings should be reviewed before use.
 
@@ -77,4 +77,3 @@ Review and replace these before deployment:
 - `CASIO_AI_OPENAI_LAYOUT_PROMPT_ID`
 - `CASIO_AI_OPENAI_LAYOUT_PROMPT_VERSION`
 - Optional rendering/model tuning env vars referenced in `app/utils/casioAi.ts` and `app/utils/casioDisplay.ts`.
-

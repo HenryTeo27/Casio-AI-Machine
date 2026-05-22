@@ -332,7 +332,7 @@ Reasons:
 Current intended server base:
 
 ```text
-https://accelertechnology.my
+https://your-server.example.com
 ```
 
 ---
@@ -349,7 +349,7 @@ DEVICE_API_KEY
 Current prototype device API key:
 
 ```text
-21326a10-c7f8-4ca9-8e7c-d6f55c15d564
+<your-device-api-key>
 ```
 
 This is acceptable for private prototype testing, but not secure for public devices.
@@ -383,7 +383,7 @@ Headers:
 
 ```http
 Content-Type: image/jpeg
-X-Device-Id: CASIO_AI_MACHINE_001
+X-Device-Id: YOUR_DEVICE_ID
 X-Device-Api-Key: <device-api-key>
 X-Question-Id: 1
 X-Photo-Index: 0
@@ -426,7 +426,7 @@ Headers:
 
 ```http
 Content-Type: application/json
-X-Device-Id: CASIO_AI_MACHINE_001
+X-Device-Id: YOUR_DEVICE_ID
 X-Device-Api-Key: <device-api-key>
 ```
 
@@ -434,7 +434,7 @@ Body:
 
 ```json
 {
-  "device_id": "CASIO_AI_MACHINE_001",
+  "device_id": "YOUR_DEVICE_ID",
   "question_id": 1,
   "photo_count": 2,
   "mode": "gpt-test",
