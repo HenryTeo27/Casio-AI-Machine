@@ -1,27 +1,18 @@
 ﻿#include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 #include "esp_camera.h"
 #include <U8g2lib.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
 #include <vector>
 #include "mbedtls/base64.h"
+#include "casio_config.h"
 
 // =====================================================
 // USER CONFIG
 // =====================================================
-
-const char* WIFI_SSID = "Henry Teo";
-const char* WIFI_PASS = "henrycute";
-
-const char* SERVER_HOST = "accelertechnology.my";
-
-const char* DEVICE_API_KEY = "21326a10-c7f8-4ca9-8e7c-d6f55c15d564";
-const char* DEVICE_ID = "CASIO_AI_MACHINE_001";
-
-const char* UPLOAD_PHOTO_PATH = "/api/casio-ai/upload-photo";
-const char* SOLVE_PATH = "/api/casio-ai/solve";
 
 // =====================================================
 // PIN CONFIG
@@ -65,8 +56,10 @@ const char* SOLVE_PATH = "/api/casio-ai/solve";
 #define SCREEN_H 32
 #define MAX_PENDING_PHOTOS 3
 #define MAX_HISTORY_ITEMS 10
+#define MAX_DRAFT_QUESTIONS 6
+#define MAX_CONCURRENT_SOLVE_JOBS 6
 
-#define BUTTON_DEBOUNCE_MS 35
+#define BUTTON_DEBOUNCE_MS 22
 #define OLED_CLEAR_SETTLE_MS 8
 #define OLED_CONTRAST 0
 #define WIFI_CONNECT_TIMEOUT_MS 15000
@@ -74,7 +67,10 @@ const char* SOLVE_PATH = "/api/casio-ai/solve";
 #define UPLOAD_RETRY_COUNT 3
 #define UPLOAD_RETRY_DELAY_MS 700
 #define SOLVE_WAIT_TIMEOUT_MS 300000UL
+#define HTTPCLIENT_SOLVE_TIMEOUT_MS 60000
 #define SOLVE_POLL_DELAY_MS 20
+#define RESULT_FETCH_TOTAL_WAIT_MS 720000UL
+#define RESULT_FETCH_RETRY_DELAY_MS 3000
 
 #define SIDEBAR_SNIPPET_CHARS 8
 
@@ -102,6 +98,7 @@ struct Button {
   bool lastStable = HIGH;
   bool lastRead = HIGH;
   unsigned long lastChange = 0;
+  unsigned long lastRepeat = 0;
 
   void begin(uint8_t p) {
     pin = p;
@@ -109,6 +106,7 @@ struct Button {
     lastStable = digitalRead(pin);
     lastRead = lastStable;
     lastChange = millis();
+    lastRepeat = 0;
   }
 
   bool fell() {
@@ -120,9 +118,19 @@ struct Button {
 
     if ((millis() - lastChange) >= BUTTON_DEBOUNCE_MS && reading != lastStable) {
       lastStable = reading;
+      if (lastStable == LOW) lastRepeat = millis();
       return lastStable == LOW;
     }
     return false;
+  }
+
+  bool repeat(unsigned long firstDelayMs = 360, unsigned long repeatMs = 140) {
+    if (lastStable != LOW) return false;
+    unsigned long now = millis();
+    if ((now - lastChange) < firstDelayMs) return false;
+    if ((now - lastRepeat) < repeatMs) return false;
+    lastRepeat = now;
+    return true;
   }
 };
 
@@ -142,6 +150,7 @@ struct DisplayBlock {
   int height = SCREEN_H;
   std::vector<uint8_t> packedXbm;  // 1-bit row-major, xbm bit-order.
   int xOffset = 0;
+  int yOffset = 0;
 };
 
 struct ChatItem {
@@ -167,6 +176,11 @@ struct SolveJob {
   std::vector<PendingPhoto> photos;
 };
 
+struct DraftQuestion {
+  int id = 0;
+  std::vector<SolveJob::PendingPhoto> photos;
+};
+
 // =====================================================
 // GLOBAL STATE
 // =====================================================
@@ -186,14 +200,16 @@ std::vector<ChatItem> history;
 int currentHistoryIndex = -1;
 int sidebarIndex = 0;
 
-int activeQuestionId = 0;
 int nextQuestionId = 1;
-std::vector<SolveJob::PendingPhoto> pendingPhotos;
+std::vector<DraftQuestion> draftQuestions;
+int activeDraftIndex = -1;
 
 bool captureBusy = false;
 bool solveRunning = false;
+int activeSolveJobs = 0;
 bool cameraSessionOn = false;
 bool answerBlankMode = false;
+bool screenDirty = true;
 
 int lastPromptTokens = -1;
 int lastCompletionTokens = -1;
@@ -201,6 +217,7 @@ int lastTotalTokens = -1;
 
 String lastOledLine1 = "";
 String lastOledLine2 = "";
+String lastBitmapKey = "";
 
 SemaphoreHandle_t stateMutex = nullptr;
 
@@ -214,6 +231,27 @@ void lockState() {
 
 void unlockState() {
   if (stateMutex) xSemaphoreGive(stateMutex);
+}
+
+void markScreenDirty() {
+  screenDirty = true;
+}
+
+void invalidateOledCache() {
+  lastOledLine1 = "__invalidate__";
+  lastOledLine2 = "";
+  lastBitmapKey = "";
+}
+
+void setScreenMode(ScreenMode mode) {
+  if (screenMode != mode) {
+    screenMode = mode;
+    markScreenDirty();
+  }
+}
+
+void syncSolveRunningFlag() {
+  solveRunning = activeSolveJobs > 0;
 }
 
 String safeShort(const String& in, int maxLen) {
@@ -265,6 +303,10 @@ std::vector<String> wrapFallbackLines(String raw) {
 }
 
 void drawTwoLines(const String& line1, const String& line2) {
+  if (line1 == lastOledLine1 && line2 == lastOledLine2) {
+    return;
+  }
+
   if (line1 != lastOledLine1 || line2 != lastOledLine2) {
     lastOledLine1 = line1;
     lastOledLine2 = line2;
@@ -288,6 +330,7 @@ void renderAnswerBlankMode() {
   if (lastOledLine1 != "__blank_style__" || lastOledLine2 != "") {
     lastOledLine1 = "__blank_style__";
     lastOledLine2 = "";
+    lastBitmapKey = "";
     Serial.println("[OLED] blank style mode");
     clearOledFrame();
   }
@@ -331,17 +374,70 @@ int parseHttpStatusCode(const String& statusLine) {
   return codeText.toInt();
 }
 
+String rawPreview(const String& raw, size_t maxLen = 200) {
+  String preview = raw.substring(0, min((int)raw.length(), (int)maxLen));
+  preview.replace("\r", "\\r");
+  preview.replace("\n", "\\n");
+  return preview;
+}
+
+bool parseRawHttpResponse(
+  const String& rawResp,
+  const char* tag,
+  int& outStatusCode,
+  String& outBody
+) {
+  outStatusCode = -1;
+  outBody = "";
+
+  if (rawResp.length() == 0) {
+    Serial.printf("[%s] empty raw response\n", tag);
+    return false;
+  }
+
+  int headerEnd = rawResp.indexOf("\r\n\r\n");
+  int bodyStart = headerEnd >= 0 ? headerEnd + 4 : -1;
+  if (headerEnd < 0) {
+    headerEnd = rawResp.indexOf("\n\n");
+    bodyStart = headerEnd >= 0 ? headerEnd + 2 : -1;
+  }
+
+  if (headerEnd >= 0) {
+    int statusEnd = rawResp.indexOf('\n');
+    if (statusEnd < 0 || statusEnd > headerEnd) statusEnd = headerEnd;
+
+    String statusLine = rawResp.substring(0, statusEnd);
+    statusLine.trim();
+    outStatusCode = parseHttpStatusCode(statusLine);
+    outBody = rawResp.substring(bodyStart);
+
+    Serial.printf("[%s] status=%d body_len=%u raw_len=%u\n",
+                  tag, outStatusCode, (unsigned)outBody.length(), (unsigned)rawResp.length());
+    if (outStatusCode <= 0) {
+      Serial.printf("[%s] bad status line: %s\n", tag, statusLine.c_str());
+      return false;
+    }
+    return true;
+  }
+
+  if (rawResp.startsWith("HTTP/")) {
+    Serial.printf("[%s] malformed HTTP response, no header separator. raw[0..200]=%s\n",
+                  tag, rawPreview(rawResp).c_str());
+    return false;
+  }
+
+  // Some simple/non-standard responses can be raw JSON without HTTP headers.
+  outStatusCode = 200;
+  outBody = rawResp;
+  Serial.printf("[%s] headerless body len=%u\n", tag, (unsigned)outBody.length());
+  return true;
+}
+
 bool ensureWiFiConnected();
 
 void showError(const String& error) {
   lastError = safeShort(error, 21);
-  screenMode = MODE_ERROR;
-}
-
-void ensureCaptureSession() {
-  if (activeQuestionId == 0) {
-    activeQuestionId = nextQuestionId++;
-  }
+  setScreenMode(MODE_ERROR);
 }
 
 void freePendingPhoto(SolveJob::PendingPhoto& p) {
@@ -364,6 +460,67 @@ ChatItem* currentChatItem() {
   return &history[currentHistoryIndex];
 }
 
+String statusLabel(const ChatItem& item) {
+  if (item.thinking) {
+    String src = item.answer;
+    src.toLowerCase();
+    if (src.indexOf("upload") >= 0) return "UPLD";
+    if (src.indexOf("render") >= 0) return "REND";
+    return "PROC";
+  }
+  if (item.answer.startsWith("Error:")) return "ERR";
+  return "READY";
+}
+
+DraftQuestion* currentDraftQuestion() {
+  if (activeDraftIndex < 0 || activeDraftIndex >= (int)draftQuestions.size()) return nullptr;
+  return &draftQuestions[activeDraftIndex];
+}
+
+bool hasAnyDraftPhotos() {
+  for (const auto& draft : draftQuestions) {
+    if (!draft.photos.empty()) return true;
+  }
+  return false;
+}
+
+int totalDraftPhotoCount() {
+  int total = 0;
+  for (const auto& draft : draftQuestions) total += draft.photos.size();
+  return total;
+}
+
+void ensureCaptureSession() {
+  if (activeDraftIndex >= 0 && activeDraftIndex < (int)draftQuestions.size()) return;
+
+  DraftQuestion draft;
+  draft.id = nextQuestionId++;
+  draftQuestions.push_back(std::move(draft));
+  activeDraftIndex = draftQuestions.size() - 1;
+  markScreenDirty();
+}
+
+void moveToNextDraftQuestion() {
+  ensureCaptureSession();
+  DraftQuestion* current = currentDraftQuestion();
+  if (current && current->photos.empty()) {
+    markScreenDirty();
+    return;
+  }
+
+  if ((int)draftQuestions.size() >= MAX_DRAFT_QUESTIONS) {
+    activeDraftIndex = draftQuestions.size() - 1;
+    markScreenDirty();
+    return;
+  }
+
+  DraftQuestion draft;
+  draft.id = nextQuestionId++;
+  draftQuestions.push_back(std::move(draft));
+  activeDraftIndex = draftQuestions.size() - 1;
+  markScreenDirty();
+}
+
 void trimHistory() {
   while ((int)history.size() > MAX_HISTORY_ITEMS) {
     history.erase(history.begin());
@@ -377,7 +534,16 @@ void trimHistory() {
 // =====================================================
 
 void renderBitmapBlock(const DisplayBlock& block) {
-  clearOledFrame();
+  String bitmapKey = String((uintptr_t)block.packedXbm.data()) + ":" +
+                     String(block.width) + "x" + String(block.height) + ":" +
+                     String(block.xOffset) + ":" + String(block.yOffset);
+  if (bitmapKey == lastBitmapKey) {
+    return;
+  }
+
+  lastBitmapKey = bitmapKey;
+  lastOledLine1 = "__bitmap__";
+  lastOledLine2 = "";
   u8g2.clearBuffer();
   u8g2.setDrawColor(1);
 
@@ -386,16 +552,30 @@ void renderBitmapBlock(const DisplayBlock& block) {
   if (xOffset < 0) xOffset = 0;
   if (xOffset > maxX) xOffset = maxX;
 
+  int maxY = max(0, block.height - SCREEN_H);
+  int yOffset = block.yOffset;
+  if (yOffset < 0) yOffset = 0;
+  if (yOffset > maxY) yOffset = maxY;
+
   int x = -xOffset;
+  int y = -yOffset;
   const uint8_t* dataPtr = block.packedXbm.empty() ? nullptr : block.packedXbm.data();
   if (dataPtr && block.width > 0 && block.height > 0) {
-    u8g2.drawXBMP(x, 0, block.width, block.height, dataPtr);
+    u8g2.drawXBMP(x, y, block.width, block.height, dataPtr);
   }
   u8g2.sendBuffer();
 }
 
 int maxXForBlock(const DisplayBlock& block) {
   return max(0, block.width - SCREEN_W);
+}
+
+int maxYForBlock(const DisplayBlock& block) {
+  return max(0, block.height - SCREEN_H);
+}
+
+bool isSupportedBitmapHeight(int height) {
+  return height == 16 || height == SCREEN_H || height == 64;
 }
 
 void renderSidebar() {
@@ -418,11 +598,11 @@ void renderSidebar() {
 
   line1 = String(idx1 == sidebarIndex ? ">" : " ") +
           "Q" + String(history[idx1].id) + " " +
-          answerPreview(history[idx1], SIDEBAR_SNIPPET_CHARS);
+          statusLabel(history[idx1]);
   if (idx2 != idx1) {
     line2 = String(idx2 == sidebarIndex ? ">" : " ") +
             "Q" + String(history[idx2].id) + " " +
-            answerPreview(history[idx2], SIDEBAR_SNIPPET_CHARS);
+            statusLabel(history[idx2]);
   } else {
     line2 = "ENTER=open";
   }
@@ -460,17 +640,19 @@ void renderSidebar() {
 }
 
 void renderCapture() {
-  int count = (int)pendingPhotos.size();
-  String bar = "[" + String(count) + "/" + String(MAX_PENDING_PHOTOS) + "] ";
-  if (count == 0) bar += "no photo";
-  else bar += "captured";
-
-  String line2 = (count >= MAX_PENDING_PHOTOS) ? "ENTER=send max" : "CAM=shot ENTER=send";
+  ensureCaptureSession();
+  DraftQuestion* draft = currentDraftQuestion();
+  int count = draft ? (int)draft->photos.size() : 0;
+  int qid = draft ? draft->id : nextQuestionId;
+  String bar = "Q" + String(qid) + " [" + String(count) + "/" + String(MAX_PENDING_PHOTOS) + "]";
+  String line2 = (count >= MAX_PENDING_PHOTOS)
+    ? "ENT send DIR next"
+    : "CAM shot ENT send";
   drawTwoLines(bar, line2);
 }
 
 void renderReady() {
-  drawTwoLines("CAM: take photo", "ENTER: send to AI");
+  drawTwoLines("CAM: new photo", "PAGE: sidebar");
 }
 
 void renderView() {
@@ -643,22 +825,7 @@ bool postUploadBinaryOnce(
   }
   client.stop();
 
-  if (rawResp.length() == 0) return false;
-
-  int headerEnd = rawResp.indexOf("\r\n\r\n");
-  if (headerEnd >= 0) {
-    String statusLine = rawResp.substring(0, rawResp.indexOf('\n'));
-    statusLine.trim();
-    outStatusCode = parseHttpStatusCode(statusLine);
-    outBody = rawResp.substring(headerEnd + 4);
-    if (outStatusCode <= 0) return false;
-    return true;
-  }
-
-  // Fallback for non-standard/simple responses: treat payload as body.
-  outStatusCode = 200;
-  outBody = rawResp;
-  return true;
+  return parseRawHttpResponse(rawResp, "UP", outStatusCode, outBody);
 }
 
 bool uploadPhotoToServer(
@@ -708,29 +875,34 @@ bool postSolveWithLongWait(const String& payload, int& outCode, String& outBody)
   client.setInsecure();
   client.setTimeout(SOLVE_WAIT_TIMEOUT_MS / 1000);
 
-  if (!client.connect(SERVER_HOST, 443)) return false;
+  if (!client.connect(SERVER_HOST, 443)) {
+    Serial.println("[SOLVE] TLS connect failed");
+    return false;
+  }
 
-  String req;
-  req.reserve(512 + payload.length());
-  req += "POST ";
-  req += SOLVE_PATH;
-  req += " HTTP/1.0\r\n";
-  req += "Host: ";
-  req += SERVER_HOST;
-  req += "\r\nContent-Type: application/json\r\nConnection: close\r\n";
-  req += "X-Device-Id: ";
-  req += DEVICE_ID;
-  req += "\r\nX-Device-Api-Key: ";
-  req += DEVICE_API_KEY;
-  req += "\r\nContent-Length: ";
-  req += String(payload.length());
-  req += "\r\n\r\n";
+  String request;
+  request.reserve(512 + payload.length());
+  request += "POST ";
+  request += SOLVE_PATH;
+  request += " HTTP/1.0\r\n";
+  request += "Host: ";
+  request += SERVER_HOST;
+  request += "\r\nContent-Type: application/json\r\nConnection: close\r\n";
+  request += "X-Device-Id: ";
+  request += DEVICE_ID;
+  request += "\r\nX-Device-Api-Key: ";
+  request += DEVICE_API_KEY;
+  request += "\r\nContent-Length: ";
+  request += String(payload.length());
+  request += "\r\n\r\n";
 
-  client.print(req);
+  client.print(request);
   client.print(payload);
 
-  String rawResp = "";
+  String rawResp;
+  rawResp.reserve(4096);
   unsigned long lastDataAt = millis();
+  unsigned long startedAt = millis();
   while (true) {
     while (client.available()) {
       rawResp += (char)client.read();
@@ -738,7 +910,13 @@ bool postSolveWithLongWait(const String& payload, int& outCode, String& outBody)
     }
 
     if (!client.connected() && !client.available()) break;
+    if ((millis() - startedAt) > SOLVE_WAIT_TIMEOUT_MS) {
+      Serial.printf("[SOLVE] raw wait timeout raw_len=%u\n", (unsigned)rawResp.length());
+      client.stop();
+      return false;
+    }
     if ((millis() - lastDataAt) > SOLVE_WAIT_TIMEOUT_MS) {
+      Serial.printf("[SOLVE] raw idle timeout raw_len=%u\n", (unsigned)rawResp.length());
       client.stop();
       return false;
     }
@@ -746,22 +924,10 @@ bool postSolveWithLongWait(const String& payload, int& outCode, String& outBody)
   }
   client.stop();
 
-  if (rawResp.length() == 0) return false;
-
-  int headerEnd = rawResp.indexOf("\r\n\r\n");
-  if (headerEnd >= 0) {
-    String statusLine = rawResp.substring(0, rawResp.indexOf('\n'));
-    statusLine.trim();
-    outCode = parseHttpStatusCode(statusLine);
-    outBody = rawResp.substring(headerEnd + 4);
-    if (outCode <= 0) return false;
-    return true;
-  }
-
-  // Fallback for simple/non-standard responses.
-  outCode = 200;
-  outBody = rawResp;
-  return true;
+  bool parsed = parseRawHttpResponse(rawResp, "SOLVE", outCode, outBody);
+  Serial.printf("[SOLVE] raw code=%d body_len=%u raw_len=%u\n",
+                outCode, (unsigned)outBody.length(), (unsigned)rawResp.length());
+  return parsed && outCode > 0;
 }
 
 bool parseDisplayBlocksFromResponse(
@@ -769,7 +935,10 @@ bool parseDisplayBlocksFromResponse(
   std::vector<DisplayBlock>& outBlocks
 ) {
   outBlocks.clear();
-  if (!displayBlocksVar.is<JsonArray>()) return false;
+  if (!displayBlocksVar.is<JsonArray>()) {
+    Serial.println("[OLED] display_blocks missing/not array");
+    return false;
+  }
 
   JsonArray arr = displayBlocksVar.as<JsonArray>();
   int pageNo = 0;
@@ -783,7 +952,7 @@ bool parseDisplayBlocksFromResponse(
 
     int width = item["width"] | 0;
     int height = item["height"] | 0;
-    if (width <= 0 || height != SCREEN_H) {
+    if (width <= 0 || !isSupportedBitmapHeight(height)) {
       Serial.printf("[OLED] skip block %d: bad size w=%d h=%d\n", pageNo, width, height);
       continue;
     }
@@ -818,6 +987,7 @@ bool parseDisplayBlocksFromResponse(
     block.width = width;
     block.height = height;
     block.xOffset = 0;
+    block.yOffset = 0;
     block.packedXbm = std::move(decoded);
     outBlocks.push_back(std::move(block));
   }
@@ -825,6 +995,290 @@ bool parseDisplayBlocksFromResponse(
   Serial.printf("[OLED] display_blocks parsed=%u/%u\n",
                 (unsigned)outBlocks.size(), (unsigned)arr.size());
   return !outBlocks.empty();
+}
+
+bool parseDisplayBlockItem(JsonVariant item, int pageNo, DisplayBlock& outBlock) {
+  String type = String((const char*)(item["type"] | ""));
+  if (type != "bitmap") {
+    Serial.printf("[OLED] skip block %d: unsupported type=%s\n", pageNo, type.c_str());
+    return false;
+  }
+
+  int width = item["width"] | 0;
+  int height = item["height"] | 0;
+  if (width <= 0 || !isSupportedBitmapHeight(height)) {
+    Serial.printf("[OLED] skip block %d: bad size w=%d h=%d\n", pageNo, width, height);
+    return false;
+  }
+
+  String format = String((const char*)(item["format"] | ""));
+  if (format != "1bit_xbm") {
+    Serial.printf("[OLED] skip block %d: unsupported format=%s\n", pageNo, format.c_str());
+    return false;
+  }
+
+  String dataBase64 = String((const char*)(item["data"] | ""));
+  if (dataBase64.length() == 0) {
+    Serial.printf("[OLED] skip block %d: empty data\n", pageNo);
+    return false;
+  }
+
+  std::vector<uint8_t> decoded;
+  if (!decodeBase64ToBytes(dataBase64, decoded)) {
+    Serial.printf("[OLED] skip block %d: base64 decode failed\n", pageNo);
+    return false;
+  }
+
+  int expected = ((width + 7) / 8) * height;
+  if ((int)decoded.size() != expected) {
+    Serial.printf("[OLED] skip block %d: bytes=%u expected=%d\n",
+                  pageNo, (unsigned)decoded.size(), expected);
+    return false;
+  }
+
+  outBlock.kind = String((const char*)(item["kind"] | "text"));
+  outBlock.width = width;
+  outBlock.height = height;
+  outBlock.xOffset = 0;
+  outBlock.yOffset = 0;
+  outBlock.packedXbm = std::move(decoded);
+  return true;
+}
+
+bool fetchQuestionBlockOnce(int questionId, int blockIndex, int& outCode, String& outBody) {
+  outCode = -1;
+  outBody = "";
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(UPLOAD_HTTP_TIMEOUT_MS / 1000);
+
+  HTTPClient http;
+  http.setTimeout(UPLOAD_HTTP_TIMEOUT_MS);
+  http.setReuse(false);
+
+  String url = String("https://") + SERVER_HOST + QUESTION_BLOCK_PATH +
+               "?question_id=" + String(questionId) +
+               "&index=" + String(blockIndex);
+  if (!http.begin(client, url)) {
+    Serial.println("[BLOCK] HTTP begin failed");
+    return false;
+  }
+
+  http.addHeader("Connection", "close");
+  http.addHeader("X-Device-Id", DEVICE_ID);
+  http.addHeader("X-Device-Api-Key", DEVICE_API_KEY);
+
+  outCode = http.GET();
+  outBody = http.getString();
+  Serial.printf("[BLOCK] httpclient index=%d code=%d body_len=%u\n",
+                blockIndex, outCode, (unsigned)outBody.length());
+  http.end();
+
+  return outCode > 0;
+}
+
+bool fetchQuestionBlockWithRetry(int questionId, int blockIndex, DisplayBlock& outBlock) {
+  unsigned long startedAt = millis();
+  int attempt = 1;
+  while ((millis() - startedAt) <= RESULT_FETCH_TOTAL_WAIT_MS) {
+    if (!ensureWiFiConnected()) return false;
+
+    int code = -1;
+    String body;
+    bool transportOk = fetchQuestionBlockOnce(questionId, blockIndex, code, body);
+    if (transportOk && code >= 200 && code < 300) {
+      JsonDocument doc;
+      DeserializationError err = deserializeJson(doc, body);
+      if (!err && (doc["ok"] | false)) {
+        if (parseDisplayBlockItem(doc["block"], blockIndex + 1, outBlock)) {
+          return true;
+        }
+      } else {
+        Serial.printf("[BLOCK] json failed index=%d err=%s body[0..120]=%s\n",
+                      blockIndex, err ? err.c_str() : "api_not_ok", rawPreview(body, 120).c_str());
+      }
+    }
+
+    attempt++;
+    delay(RESULT_FETCH_RETRY_DELAY_MS);
+  }
+  return false;
+}
+
+bool fetchQuestionBlocksWithRetry(
+  int questionId,
+  int blockCount,
+  std::vector<DisplayBlock>& outBlocks,
+  const String& progressiveAnswer = ""
+) {
+  outBlocks.clear();
+  if (blockCount <= 0) return false;
+  outBlocks.reserve(blockCount);
+
+  for (int index = 0; index < blockCount; index++) {
+    DisplayBlock block;
+    if (!fetchQuestionBlockWithRetry(questionId, index, block)) {
+      Serial.printf("[BLOCK] failed to fetch block %d/%d\n", index + 1, blockCount);
+      outBlocks.clear();
+      return false;
+    }
+    outBlocks.push_back(std::move(block));
+
+    if (progressiveAnswer.length() > 0) {
+      lockState();
+      for (auto& item : history) {
+        if (item.id == questionId) {
+          item.thinking = false;
+          item.answer = progressiveAnswer;
+          item.blocks = outBlocks;
+          item.fallbackLines = wrapFallbackLines(progressiveAnswer);
+          if (item.blockIndex < 0 || item.blockIndex >= (int)item.blocks.size()) {
+            item.blockIndex = 0;
+          }
+          item.fallbackLineOffset = 0;
+          if (currentHistoryIndex < 0 && screenMode == MODE_THINKING) {
+            currentHistoryIndex = history.size() - 1;
+            sidebarIndex = currentHistoryIndex;
+            setScreenMode(MODE_VIEW);
+          } else if (screenMode == MODE_THINKING && currentChatItem() && currentChatItem()->id == questionId) {
+            setScreenMode(MODE_VIEW);
+          }
+          markScreenDirty();
+          break;
+        }
+      }
+      unlockState();
+      Serial.printf("[BLOCK] progressive ready=%u/%d\n",
+                    (unsigned)outBlocks.size(), blockCount);
+    }
+  }
+
+  Serial.printf("[BLOCK] fetched display_blocks=%u/%d\n",
+                (unsigned)outBlocks.size(), blockCount);
+  return !outBlocks.empty();
+}
+
+bool parseSolveJsonBody(
+  int questionId,
+  const String& body,
+  String& outAnswer,
+  std::vector<DisplayBlock>& outBlocks
+) {
+  JsonDocument responseJson;
+  DeserializationError err = deserializeJson(responseJson, body);
+  if (err) {
+    Serial.printf("[AI] json parse failed: %s body[0..200]=%s\n",
+                  err.c_str(), rawPreview(body).c_str());
+    outAnswer = "AI JSON parse";
+    return false;
+  }
+
+  bool ok = responseJson["ok"] | false;
+  if (!ok) {
+    outAnswer = String((const char*)(responseJson["error"] | "AI failed"));
+    return false;
+  }
+
+  outAnswer = String((const char*)(responseJson["answer"] | ""));
+  if (outAnswer.length() == 0) {
+    outAnswer = String((const char*)(responseJson["display_text"] | ""));
+  }
+  if (outAnswer.length() == 0) outAnswer = "AI done";
+
+  bool hasInlineBlocks = parseDisplayBlocksFromResponse(responseJson["display_blocks"], outBlocks);
+  int displayBlockCount = responseJson["display_block_count"] | 0;
+  bool displayBlocksInline = responseJson["display_blocks_inline"] | true;
+  if (!hasInlineBlocks && displayBlockCount > 0) {
+    Serial.printf("[OLED] inline blocks unavailable inline=%d count=%d; fetching blocks\n",
+                  displayBlocksInline ? 1 : 0, displayBlockCount);
+    fetchQuestionBlocksWithRetry(questionId, displayBlockCount, outBlocks, outAnswer);
+  }
+
+  JsonVariant usage = responseJson["usage"];
+  if (!usage.isNull()) {
+    if (usage["input_tokens"].is<int>()) lastPromptTokens = usage["input_tokens"].as<int>();
+    if (usage["output_tokens"].is<int>()) lastCompletionTokens = usage["output_tokens"].as<int>();
+    if (usage["total_tokens"].is<int>()) lastTotalTokens = usage["total_tokens"].as<int>();
+  }
+
+  return true;
+}
+
+bool fetchQuestionResultOnce(int questionId, int& outCode, String& outBody) {
+  outCode = -1;
+  outBody = "";
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(UPLOAD_HTTP_TIMEOUT_MS / 1000);
+
+  HTTPClient http;
+  http.setTimeout(UPLOAD_HTTP_TIMEOUT_MS);
+  http.setReuse(false);
+
+  String url = String("https://") + SERVER_HOST + QUESTION_RESULT_PATH +
+               "?question_id=" + String(questionId);
+  if (!http.begin(client, url)) {
+    Serial.println("[RESULT] HTTP begin failed");
+    return false;
+  }
+
+  http.addHeader("Connection", "close");
+  http.addHeader("X-Device-Id", DEVICE_ID);
+  http.addHeader("X-Device-Api-Key", DEVICE_API_KEY);
+
+  outCode = http.GET();
+  outBody = http.getString();
+  Serial.printf("[RESULT] httpclient code=%d body_len=%u\n",
+                outCode, (unsigned)outBody.length());
+  http.end();
+
+  return outCode > 0;
+}
+
+bool fetchQuestionResultWithRetry(
+  int questionId,
+  String& outAnswer,
+  std::vector<DisplayBlock>& outBlocks
+) {
+  unsigned long startedAt = millis();
+  int attempt = 1;
+  while ((millis() - startedAt) <= RESULT_FETCH_TOTAL_WAIT_MS) {
+    if (!ensureWiFiConnected()) return false;
+
+    int code = -1;
+    String body;
+    unsigned long t0 = millis();
+    bool transportOk = fetchQuestionResultOnce(questionId, code, body);
+    Serial.printf("[TIME] result_fetch_%d=%lums ok=%d code=%d\n",
+                  attempt, (unsigned long)(millis() - t0), transportOk ? 1 : 0, code);
+
+    if (transportOk) {
+      if (code >= 200 && code < 300 && parseSolveJsonBody(questionId, body, outAnswer, outBlocks)) {
+        Serial.println("[RESULT] fetched completed answer");
+        return true;
+      }
+
+      JsonDocument statusDoc;
+      DeserializationError err = deserializeJson(statusDoc, body);
+      String status = err ? "" : String((const char*)(statusDoc["status"] | ""));
+      String error = err ? "" : String((const char*)(statusDoc["error"] | ""));
+      if (status == "FAILED" || code >= 500) {
+        outAnswer = error.length() ? error : "AI failed";
+        Serial.printf("[RESULT] terminal failure status=%s error=%s\n",
+                      status.c_str(), error.c_str());
+        return false;
+      }
+    }
+
+    if (body.length() > 0) {
+      Serial.printf("[RESULT] body[0..200]=%s\n", rawPreview(body).c_str());
+    }
+    attempt++;
+    delay(RESULT_FETCH_RETRY_DELAY_MS);
+  }
+  return false;
 }
 
 bool requestSolveFromServer(
@@ -863,43 +1317,24 @@ bool requestSolveFromServer(
   int statusCode = -1;
   String body;
   if (!postSolveWithLongWait(payload, statusCode, body)) {
+    Serial.println("[AI] solve transport failed; trying result fetch fallback");
+    if (fetchQuestionResultWithRetry(questionId, outAnswer, outBlocks)) return true;
     outAnswer = "AI timeout";
     return false;
   }
 
   if (statusCode < 200 || statusCode >= 300) {
+    Serial.printf("[AI] solve HTTP %d; trying result fetch fallback\n", statusCode);
+    if (fetchQuestionResultWithRetry(questionId, outAnswer, outBlocks)) return true;
     outAnswer = "AI HTTP " + String(statusCode);
     return false;
   }
 
-  JsonDocument responseJson;
-  if (deserializeJson(responseJson, body)) {
-    outAnswer = body;
-    return false;
-  }
+  if (parseSolveJsonBody(questionId, body, outAnswer, outBlocks)) return true;
 
-  bool ok = responseJson["ok"] | false;
-  if (!ok) {
-    outAnswer = String((const char*)(responseJson["error"] | "AI failed"));
-    return false;
-  }
-
-  outAnswer = String((const char*)(responseJson["answer"] | ""));
-  if (outAnswer.length() == 0) {
-    outAnswer = String((const char*)(responseJson["display_text"] | ""));
-  }
-  if (outAnswer.length() == 0) outAnswer = "AI done";
-
-  parseDisplayBlocksFromResponse(responseJson["display_blocks"], outBlocks);
-
-  JsonVariant usage = responseJson["usage"];
-  if (!usage.isNull()) {
-    if (usage["input_tokens"].is<int>()) lastPromptTokens = usage["input_tokens"].as<int>();
-    if (usage["output_tokens"].is<int>()) lastCompletionTokens = usage["output_tokens"].as<int>();
-    if (usage["total_tokens"].is<int>()) lastTotalTokens = usage["total_tokens"].as<int>();
-  }
-
-  return true;
+  Serial.println("[AI] solve body parse failed; trying result fetch fallback");
+  if (fetchQuestionResultWithRetry(questionId, outAnswer, outBlocks)) return true;
+  return false;
 }
 
 // =====================================================
@@ -1043,10 +1478,13 @@ camera_fb_t* captureFrameWithRetryAndFallback(sensor_t* s) {
 }
 
 bool captureOnePhotoToPsr() {
-  if (captureBusy || solveRunning) return false;
-  if ((int)pendingPhotos.size() >= MAX_PENDING_PHOTOS) return false;
+  if (captureBusy) return false;
 
   ensureCaptureSession();
+  DraftQuestion* draft = currentDraftQuestion();
+  if (!draft) return false;
+  if ((int)draft->photos.size() >= MAX_PENDING_PHOTOS) return false;
+
   uint32_t t0 = millis();
   if (!ensureCameraReady()) {
     showError("Camera init fail");
@@ -1055,7 +1493,7 @@ bool captureOnePhotoToPsr() {
   uint32_t tInit = millis() - t0;
 
   captureBusy = true;
-  screenMode = MODE_CAPTURE;
+  setScreenMode(MODE_CAPTURE);
   drawTwoLines("Capturing...", "Please wait");
   delay(CAM_SETTLE_AFTER_INIT_MS);
   uint32_t tWarmupStart = millis();
@@ -1103,7 +1541,7 @@ bool captureOnePhotoToPsr() {
   esp_camera_fb_return(fb);
   stopCameraForCooling();
 
-  pendingPhotos.push_back(photo);
+  draft->photos.push_back(photo);
 
   uint32_t tTotal = millis() - t0;
   Serial.printf(
@@ -1115,14 +1553,15 @@ bool captureOnePhotoToPsr() {
   );
   Serial.printf(
     "[CAM] saved #%d bytes=%u w=%u h=%u (pending in PSRAM)\n",
-    (int)pendingPhotos.size(),
+    (int)draft->photos.size(),
     (unsigned)photo.len,
     photo.width,
     photo.height
   );
 
   captureBusy = false;
-  screenMode = MODE_CAPTURE;
+  setScreenMode(MODE_CAPTURE);
+  markScreenDirty();
   return true;
 }
 
@@ -1146,6 +1585,7 @@ void solveTask(void* param) {
       if (item.id == job->questionId && item.thinking) {
         item.answer = "Uploading " + String(i + 1) + "/" + String(job->photos.size());
         item.fallbackLines = wrapFallbackLines(item.answer);
+        markScreenDirty();
         break;
       }
     }
@@ -1184,6 +1624,7 @@ void solveTask(void* param) {
       if (item.id == job->questionId && item.thinking) {
         item.answer = "Thinking...";
         item.fallbackLines = wrapFallbackLines(item.answer);
+        markScreenDirty();
         break;
       }
     }
@@ -1220,42 +1661,48 @@ void solveTask(void* param) {
     }
   }
 
-  solveRunning = false;
-  screenMode = MODE_VIEW;
+  if (activeSolveJobs > 0) activeSolveJobs--;
+  syncSolveRunningFlag();
+  if (screenMode == MODE_THINKING && (currentHistoryIndex < 0 || currentHistoryIndex >= (int)history.size())) {
+    currentHistoryIndex = history.size() - 1;
+    sidebarIndex = currentHistoryIndex;
+    setScreenMode(MODE_VIEW);
+  } else if (screenMode == MODE_THINKING && currentChatItem() && currentChatItem()->id == job->questionId) {
+    setScreenMode(MODE_VIEW);
+  }
+  markScreenDirty();
   unlockState();
 
   delete job;
   vTaskDelete(NULL);
 }
 
-void startSolveFromPending() {
-  if (solveRunning) return;
-  if (pendingPhotos.empty() || activeQuestionId == 0) return;
-
-  lockState();
+bool startSolveJobForDraft(DraftQuestion& draft, bool selectIfFirst) {
+  if (draft.photos.empty() || draft.id == 0) return false;
+  if (activeSolveJobs >= MAX_CONCURRENT_SOLVE_JOBS) return false;
 
   ChatItem item;
-  item.id = activeQuestionId;
-  item.photoCount = pendingPhotos.size();
+  item.id = draft.id;
+  item.photoCount = draft.photos.size();
   item.thinking = true;
   item.answer = "Uploading...";
   item.fallbackLines = wrapFallbackLines(item.answer);
 
   history.push_back(item);
   trimHistory();
-  currentHistoryIndex = history.size() - 1;
-  sidebarIndex = currentHistoryIndex;
+  int newHistoryIndex = history.size() - 1;
+  if (selectIfFirst || currentHistoryIndex < 0) {
+    currentHistoryIndex = newHistoryIndex;
+    sidebarIndex = currentHistoryIndex;
+  }
 
   SolveJob* job = new SolveJob();
-  job->questionId = activeQuestionId;
-  job->photoCount = pendingPhotos.size();
-  job->photos = std::move(pendingPhotos);
+  job->questionId = draft.id;
+  job->photoCount = draft.photos.size();
+  job->photos = std::move(draft.photos);
 
-  activeQuestionId = 0;
-  solveRunning = true;
-  screenMode = MODE_THINKING;
-
-  unlockState();
+  activeSolveJobs++;
+  syncSolveRunningFlag();
 
   BaseType_t taskOk = xTaskCreatePinnedToCore(
     solveTask,
@@ -1269,9 +1716,39 @@ void startSolveFromPending() {
   if (taskOk != pdPASS) {
     clearPendingPhotos(job->photos);
     delete job;
-    solveRunning = false;
+    if (activeSolveJobs > 0) activeSolveJobs--;
+    syncSolveRunningFlag();
     showError("Task create fail");
+    return false;
   }
+
+  return true;
+}
+
+void startSolveFromDrafts() {
+  if (!hasAnyDraftPhotos()) return;
+
+  lockState();
+
+  bool selectedFirstStarted = false;
+  int startedJobs = 0;
+  for (auto& draft : draftQuestions) {
+    if (draft.photos.empty()) continue;
+    bool started = startSolveJobForDraft(draft, !selectedFirstStarted);
+    if (started) {
+      selectedFirstStarted = true;
+      startedJobs++;
+    }
+  }
+
+  draftQuestions.clear();
+  activeDraftIndex = -1;
+  if (startedJobs > 0) {
+    setScreenMode(MODE_THINKING);
+  }
+  markScreenDirty();
+
+  unlockState();
 }
 
 // =====================================================
@@ -1280,6 +1757,10 @@ void startSolveFromPending() {
 
 void actionUp() {
   answerBlankMode = false;
+  if (screenMode == MODE_CAPTURE) {
+    moveToNextDraftQuestion();
+    return;
+  }
   if (screenMode == MODE_SIDEBAR) {
     if (sidebarIndex > 0) sidebarIndex--;
     return;
@@ -1290,9 +1771,22 @@ void actionUp() {
   if (!item || item->thinking) return;
 
   if (!item->blocks.empty()) {
+    DisplayBlock& currentBlock = item->blocks[item->blockIndex];
+    if (currentBlock.yOffset > 0) {
+      currentBlock.yOffset -= SCREEN_H;
+      if (currentBlock.yOffset < 0) currentBlock.yOffset = 0;
+      return;
+    }
     if (item->blockIndex > 0) {
+      int previousX = currentBlock.xOffset;
+      int previousWidth = currentBlock.width;
+      String previousKind = currentBlock.kind;
       item->blockIndex--;
-      item->blocks[item->blockIndex].xOffset = 0;
+      DisplayBlock& nextBlock = item->blocks[item->blockIndex];
+      bool sameScrollablePair =
+        nextBlock.width == previousWidth && nextBlock.kind == previousKind;
+      nextBlock.xOffset = sameScrollablePair ? min(previousX, maxXForBlock(nextBlock)) : 0;
+      nextBlock.yOffset = maxYForBlock(nextBlock);
     }
     return;
   }
@@ -1302,6 +1796,10 @@ void actionUp() {
 
 void actionDown() {
   answerBlankMode = false;
+  if (screenMode == MODE_CAPTURE) {
+    moveToNextDraftQuestion();
+    return;
+  }
   if (screenMode == MODE_SIDEBAR) {
     if (sidebarIndex < (int)history.size() - 1) sidebarIndex++;
     return;
@@ -1312,9 +1810,23 @@ void actionDown() {
   if (!item || item->thinking) return;
 
   if (!item->blocks.empty()) {
+    DisplayBlock& currentBlock = item->blocks[item->blockIndex];
+    int maxY = maxYForBlock(currentBlock);
+    if (currentBlock.yOffset < maxY) {
+      currentBlock.yOffset += SCREEN_H;
+      if (currentBlock.yOffset > maxY) currentBlock.yOffset = maxY;
+      return;
+    }
     if (item->blockIndex < (int)item->blocks.size() - 1) {
+      int previousX = currentBlock.xOffset;
+      int previousWidth = currentBlock.width;
+      String previousKind = currentBlock.kind;
       item->blockIndex++;
-      item->blocks[item->blockIndex].xOffset = 0;
+      DisplayBlock& nextBlock = item->blocks[item->blockIndex];
+      bool sameScrollablePair =
+        nextBlock.width == previousWidth && nextBlock.kind == previousKind;
+      nextBlock.xOffset = sameScrollablePair ? min(previousX, maxXForBlock(nextBlock)) : 0;
+      nextBlock.yOffset = 0;
     }
     return;
   }
@@ -1326,6 +1838,10 @@ void actionDown() {
 
 void actionLeft() {
   answerBlankMode = false;
+  if (screenMode == MODE_CAPTURE) {
+    moveToNextDraftQuestion();
+    return;
+  }
   if (screenMode != MODE_VIEW && screenMode != MODE_THINKING) return;
   if (history.empty()) return;
 
@@ -1338,8 +1854,13 @@ void actionLeft() {
       return;
     }
     if (item->blockIndex > 0) {
+      int previousWidth = block.width;
+      String previousKind = block.kind;
       item->blockIndex--;
-      item->blocks[item->blockIndex].xOffset = maxXForBlock(item->blocks[item->blockIndex]);
+      DisplayBlock& nextBlock = item->blocks[item->blockIndex];
+      bool sameScrollablePair =
+        nextBlock.width == previousWidth && nextBlock.kind == previousKind;
+      nextBlock.xOffset = sameScrollablePair ? 0 : maxXForBlock(nextBlock);
     }
     return;
   }
@@ -1352,6 +1873,10 @@ void actionLeft() {
 
 void actionRight() {
   answerBlankMode = false;
+  if (screenMode == MODE_CAPTURE) {
+    moveToNextDraftQuestion();
+    return;
+  }
   if (screenMode != MODE_VIEW && screenMode != MODE_THINKING) return;
   if (history.empty()) return;
 
@@ -1365,8 +1890,14 @@ void actionRight() {
       return;
     }
     if (item->blockIndex < (int)item->blocks.size() - 1) {
+      int previousX = block.xOffset;
+      int previousWidth = block.width;
+      String previousKind = block.kind;
       item->blockIndex++;
-      item->blocks[item->blockIndex].xOffset = 0;
+      DisplayBlock& nextBlock = item->blocks[item->blockIndex];
+      bool sameScrollablePair =
+        nextBlock.width == previousWidth && nextBlock.kind == previousKind;
+      nextBlock.xOffset = sameScrollablePair ? min(previousX, maxXForBlock(nextBlock)) : 0;
     }
     return;
   }
@@ -1378,10 +1909,11 @@ void actionRight() {
 }
 
 void actionCamera() {
-  if (screenMode == MODE_ERROR || solveRunning) return;
+  if (screenMode == MODE_ERROR) return;
   answerBlankMode = false;
   if (screenMode != MODE_CAPTURE) {
-    screenMode = MODE_CAPTURE;
+    ensureCaptureSession();
+    setScreenMode(MODE_CAPTURE);
     return;
   }
   captureOnePhotoToPsr();
@@ -1391,11 +1923,11 @@ void actionEnter() {
   if (screenMode == MODE_SIDEBAR) {
     answerBlankMode = false;
     if (history.empty()) {
-      screenMode = MODE_READY;
+      setScreenMode(hasAnyDraftPhotos() ? MODE_CAPTURE : MODE_READY);
       return;
     }
     currentHistoryIndex = sidebarIndex;
-    screenMode = MODE_VIEW;
+    setScreenMode(MODE_VIEW);
     return;
   }
 
@@ -1407,14 +1939,14 @@ void actionEnter() {
     }
   }
 
-  if (!pendingPhotos.empty()) {
+  if (hasAnyDraftPhotos()) {
     answerBlankMode = false;
-    startSolveFromPending();
+    startSolveFromDrafts();
   }
 }
 
 void actionPage() {
-  if (screenMode == MODE_ERROR || solveRunning) return;
+  if (screenMode == MODE_ERROR) return;
   answerBlankMode = false;
 
   if (screenMode == MODE_SIDEBAR) {
@@ -1422,15 +1954,15 @@ void actionPage() {
       if (currentHistoryIndex < 0 || currentHistoryIndex >= (int)history.size()) {
         currentHistoryIndex = history.size() - 1;
       }
-      screenMode = MODE_VIEW;
+      setScreenMode(MODE_VIEW);
     } else {
-      screenMode = pendingPhotos.empty() ? MODE_READY : MODE_CAPTURE;
+      setScreenMode(hasAnyDraftPhotos() ? MODE_CAPTURE : MODE_READY);
     }
     return;
   }
 
   if (history.empty()) {
-    screenMode = pendingPhotos.empty() ? MODE_READY : MODE_CAPTURE;
+    setScreenMode(hasAnyDraftPhotos() ? MODE_CAPTURE : MODE_READY);
     return;
   }
 
@@ -1438,7 +1970,7 @@ void actionPage() {
     currentHistoryIndex = history.size() - 1;
   }
   sidebarIndex = currentHistoryIndex;
-  screenMode = MODE_SIDEBAR;
+  setScreenMode(MODE_SIDEBAR);
 }
 
 // =====================================================
@@ -1469,6 +2001,7 @@ void setup() {
   u8g2.enableUTF8Print();
 
   screenMode = MODE_BOOT;
+  markScreenDirty();
   renderScreen();
   delay(900);
   quietCameraPins();
@@ -1479,43 +2012,58 @@ void setup() {
     return;
   }
 
-  screenMode = MODE_SIDEBAR;
+  setScreenMode(MODE_SIDEBAR);
   renderScreen();
 }
 
 void loop() {
-  if (btnUp.fell()) {
+  bool inputHandled = false;
+  if (btnUp.fell() || btnUp.repeat()) {
     Serial.println("[BTN] UP");
     actionUp();
+    inputHandled = true;
   }
-  if (btnDown.fell()) {
+  if (btnDown.fell() || btnDown.repeat()) {
     Serial.println("[BTN] DOWN");
     actionDown();
+    inputHandled = true;
   }
-  if (btnLeft.fell()) {
+  if (btnLeft.fell() || btnLeft.repeat()) {
     Serial.println("[BTN] PREV");
     actionLeft();
+    inputHandled = true;
   }
-  if (btnRight.fell()) {
+  if (btnRight.fell() || btnRight.repeat()) {
     Serial.println("[BTN] NEXT");
     actionRight();
+    inputHandled = true;
   }
   if (btnCamera.fell()) {
     Serial.println("[BTN] CAMERA");
     actionCamera();
+    inputHandled = true;
   }
   if (btnEnter.fell()) {
     Serial.println("[BTN] ENTER");
     actionEnter();
+    inputHandled = true;
   }
   if (btnPage.fell()) {
     Serial.println("[BTN] PAGE");
     actionPage();
+    inputHandled = true;
   }
 
-  if (screenMode == MODE_READY && !pendingPhotos.empty()) {
-    screenMode = MODE_CAPTURE;
+  if (inputHandled) {
+    markScreenDirty();
   }
-  renderScreen();
+
+  if (screenMode == MODE_READY && hasAnyDraftPhotos()) {
+    setScreenMode(MODE_CAPTURE);
+  }
+  if (screenDirty) {
+    renderScreen();
+    screenDirty = false;
+  }
   delay(20);
 }

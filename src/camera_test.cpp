@@ -8,18 +8,9 @@
 #include <ArduinoJson.h>
 #include "esp_sleep.h"
 #include "esp_camera.h"
+#include "casio_config.h"
 
-// =====================================================
-// USER CONFIG
-// =====================================================
-const char* WIFI_SSID = "Henry Teo";
-const char* WIFI_PASS = "henrycute";
-
-const char* SERVER_BASE_URL = "https://accelertechnology.my";
-const char* DEVICE_ID = "CASIO_AI_MACHINE_001";
-const char* DEVICE_API_KEY = "21326a10-c7f8-4ca9-8e7c-d6f55c15d564";
-
-const char* UPLOAD_PHOTO_PATH = "/api/casio-ai/upload-photo";
+const String SERVER_BASE_URL = String("https://") + SERVER_HOST;
 
 // =====================================================
 // PIN CONFIG

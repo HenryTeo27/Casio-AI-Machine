@@ -15,6 +15,7 @@ test-results/
 .pio/
 build/
 .vscode/
+server/app/utils/fonts/
 
 # Python caches
 __pycache__/
@@ -34,6 +35,10 @@ __pycache__/
 *.jpeg
 *.webp
 *.gif
+*.otf
+*.ttf
+*.woff
+*.woff2
 
 # Lockfiles and generated metadata
 package-lock.json

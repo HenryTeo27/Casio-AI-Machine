@@ -10,7 +10,8 @@ This repository is firmware-oriented (PlatformIO). Keep search/edit scope narrow
 - Use `Select-String` fallback only on narrow scopes.
 - Limit each read to short windows (60-90 lines) when file size is unknown.
 - Default `rg` scope:
-  - `rg -n "<pattern>" agents skills src include lib test platformio.ini`
+  - firmware: `rg -n "<pattern>" agents skills src include lib test platformio.ini`
+  - backend: `rg -n "<pattern>" server/app server/prisma server/utils`
 - Expand scope only after no-hit in default scope.
 
 ## 2) Token Hygiene
@@ -48,6 +49,7 @@ This repository is firmware-oriented (PlatformIO). Keep search/edit scope narrow
 - Default editable scope:
   - `agents/**`
   - `skills/**`
+  - backend reference copy (`server/**`)
   - firmware sources (`src/**`, `include/**`, `lib/**`, `test/**`)
   - root policy/config docs (`AGENTS.md`, `PROJECT_MAP.md`, `.rgignore`, `repomix.config.json`)
 - Do not modify by default:
@@ -58,3 +60,4 @@ This repository is firmware-oriented (PlatformIO). Keep search/edit scope narrow
 - Project basics: `agents/PROJECT_MAP.md`
 - Policy details: `agents/docs/agents/context-audit.md`
 - Firmware config: `platformio.ini`
+- Server backend reference: `server/README.md`

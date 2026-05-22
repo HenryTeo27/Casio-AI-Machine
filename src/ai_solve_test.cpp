@@ -7,6 +7,7 @@
 #include <Wire.h>
 #include <U8g2lib.h>
 #include "mbedtls/base64.h"
+#include "casio_config.h"
 
 // OLED pins (same as main system)
 #define OLED_SDA 1
@@ -17,26 +18,10 @@
 #define BTN_SCROLL_LEFT 40
 #define BTN_SCROLL_RIGHT 41
 
-// =====================================================
-// USER CONFIG
-// =====================================================
-const char* WIFI_SSID = "Henry Teo";
-const char* WIFI_PASS = "henrycute";
-
-const char* SERVER_HOST = "accelertechnology.my";
-const char* UPLOAD_PATH = "/api/casio-ai/upload-photo";
-const char* SOLVE_PATH = "/api/casio-ai/solve";
-
-const char* DEVICE_ID = "CASIO_AI_MACHINE_001";
-const char* DEVICE_API_KEY = "21326a10-c7f8-4ca9-8e7c-d6f55c15d564";
-
-const char* FIXED_PHOTO_URL =
-  "https://k6b38ex5bcg3evfg.public.blob.vercel-storage.com/casio-ai/device/"
-  "CASIO_AI_MACHINE_001/2026-05-20/q1/1-0-6d2e5631-b830-4dd7-a8e2-0c2add4794ec.jpg";
-
 static constexpr uint32_t WIFI_TIMEOUT_MS = 20000;
 static constexpr uint32_t HTTP_TIMEOUT_MS = 60000;
 static constexpr uint32_t SOLVE_TIMEOUT_MS = 300000;
+static constexpr uint16_t HTTPCLIENT_SOLVE_TIMEOUT_MS = 60000;
 static constexpr int UPLOAD_RETRY_COUNT = 3;
 static constexpr int DOWNLOAD_RETRY_COUNT = 5;
 static constexpr uint32_t DOWNLOAD_RETRY_DELAY_MS = 900;
@@ -44,6 +29,9 @@ static constexpr uint32_t DOWNLOAD_OVERALL_TIMEOUT_MS = 90000;
 static constexpr uint32_t BUTTON_DEBOUNCE_MS = 35;
 static constexpr int H_SCROLL_STEP = 32;
 static constexpr uint32_t OLED_CLEAR_SETTLE_MS = 8;
+static constexpr uint8_t OLED_CONTRAST = 0;
+static constexpr uint32_t RESULT_FETCH_TOTAL_WAIT_MS = 720000;
+static constexpr uint32_t RESULT_FETCH_RETRY_DELAY_MS = 3000;
 
 U8G2_SSD1305_128X32_NONAME_F_HW_I2C u8g2(U8G2_R0, OLED_RST);
 
@@ -90,6 +78,7 @@ std::vector<DisplayBlock> gBlocks;
 bool gViewerActive = false;
 int gBlockIndex = 0;
 int gXOffset = 0;
+int gYOffset = 0;
 
 void drawTwoLines(const String& l1, const String& l2) {
   u8g2.clearBuffer();
@@ -152,24 +141,50 @@ void invertBitmapBytes(std::vector<uint8_t>& bytes) {
 
 bool parseDisplayBlocks(JsonVariant displayBlocksVar, std::vector<DisplayBlock>& outBlocks) {
   outBlocks.clear();
-  if (!displayBlocksVar.is<JsonArray>()) return false;
+  if (!displayBlocksVar.is<JsonArray>()) {
+    Serial.println("[OLED] display_blocks missing/not array");
+    return false;
+  }
 
   JsonArray arr = displayBlocksVar.as<JsonArray>();
+  int pageNo = 0;
   for (JsonVariant item : arr) {
+    pageNo++;
     String type = String((const char*)(item["type"] | ""));
     String format = String((const char*)(item["format"] | ""));
     int width = item["width"] | 0;
     int height = item["height"] | 0;
     String b64 = String((const char*)(item["data"] | ""));
 
-    if (type != "bitmap" || format != "1bit_xbm") continue;
-    if (width <= 0 || height <= 0 || b64.length() == 0) continue;
+    if (type != "bitmap") {
+      Serial.printf("[OLED] skip block %d: unsupported type=%s\n", pageNo, type.c_str());
+      continue;
+    }
+    if (format != "1bit_xbm") {
+      Serial.printf("[OLED] skip block %d: unsupported format=%s\n", pageNo, format.c_str());
+      continue;
+    }
+    if (width <= 0 || (height != 16 && height != 32 && height != 64)) {
+      Serial.printf("[OLED] skip block %d: bad size w=%d h=%d\n", pageNo, width, height);
+      continue;
+    }
+    if (b64.length() == 0) {
+      Serial.printf("[OLED] skip block %d: empty data\n", pageNo);
+      continue;
+    }
 
     std::vector<uint8_t> decoded;
-    if (!decodeBase64ToBytes(b64, decoded)) continue;
+    if (!decodeBase64ToBytes(b64, decoded)) {
+      Serial.printf("[OLED] skip block %d: base64 decode failed\n", pageNo);
+      continue;
+    }
 
     int expected = ((width + 7) / 8) * height;
-    if ((int)decoded.size() != expected) continue;
+    if ((int)decoded.size() != expected) {
+      Serial.printf("[OLED] skip block %d: bytes=%u expected=%d\n",
+                    pageNo, (unsigned)decoded.size(), expected);
+      continue;
+    }
 
     DisplayBlock block;
     block.width = width;
@@ -178,11 +193,60 @@ bool parseDisplayBlocks(JsonVariant displayBlocksVar, std::vector<DisplayBlock>&
     outBlocks.push_back(std::move(block));
   }
 
+  Serial.printf("[OLED] display_blocks parsed=%u/%u\n",
+                (unsigned)outBlocks.size(), (unsigned)arr.size());
   return !outBlocks.empty();
+}
+
+bool parseDisplayBlockItem(JsonVariant item, int pageNo, DisplayBlock& outBlock) {
+  String type = String((const char*)(item["type"] | ""));
+  String format = String((const char*)(item["format"] | ""));
+  int width = item["width"] | 0;
+  int height = item["height"] | 0;
+  String b64 = String((const char*)(item["data"] | ""));
+
+  if (type != "bitmap") {
+    Serial.printf("[OLED] skip block %d: unsupported type=%s\n", pageNo, type.c_str());
+    return false;
+  }
+  if (format != "1bit_xbm") {
+    Serial.printf("[OLED] skip block %d: unsupported format=%s\n", pageNo, format.c_str());
+    return false;
+  }
+  if (width <= 0 || (height != 16 && height != 32 && height != 64)) {
+    Serial.printf("[OLED] skip block %d: bad size w=%d h=%d\n", pageNo, width, height);
+    return false;
+  }
+  if (b64.length() == 0) {
+    Serial.printf("[OLED] skip block %d: empty data\n", pageNo);
+    return false;
+  }
+
+  std::vector<uint8_t> decoded;
+  if (!decodeBase64ToBytes(b64, decoded)) {
+    Serial.printf("[OLED] skip block %d: base64 decode failed\n", pageNo);
+    return false;
+  }
+
+  int expected = ((width + 7) / 8) * height;
+  if ((int)decoded.size() != expected) {
+    Serial.printf("[OLED] skip block %d: bytes=%u expected=%d\n",
+                  pageNo, (unsigned)decoded.size(), expected);
+    return false;
+  }
+
+  outBlock.width = width;
+  outBlock.height = height;
+  outBlock.data = std::move(decoded);
+  return true;
 }
 
 int maxXFor(const DisplayBlock& b) {
   return max(0, b.width - 128);
+}
+
+int maxYFor(const DisplayBlock& b) {
+  return max(0, b.height - 32);
 }
 
 void clampViewer() {
@@ -192,6 +256,9 @@ void clampViewer() {
   int maxX = maxXFor(gBlocks[gBlockIndex]);
   if (gXOffset < 0) gXOffset = 0;
   if (gXOffset > maxX) gXOffset = maxX;
+  int maxY = maxYFor(gBlocks[gBlockIndex]);
+  if (gYOffset < 0) gYOffset = 0;
+  if (gYOffset > maxY) gYOffset = maxY;
 }
 
 void renderCurrentBlock() {
@@ -201,25 +268,46 @@ void renderCurrentBlock() {
   clearOledFrame();
   u8g2.clearBuffer();
   u8g2.setDrawColor(1);
-  u8g2.drawXBMP(-gXOffset, 0, b.width, b.height, b.data.data());
+  u8g2.drawXBMP(-gXOffset, -gYOffset, b.width, b.height, b.data.data());
   u8g2.sendBuffer();
-  Serial.printf("[OLED] block %d/%u x=%d maxX=%d\n",
-                gBlockIndex + 1, (unsigned)gBlocks.size(), gXOffset, maxXFor(b));
+  Serial.printf("[OLED] block %d/%u x=%d/%d y=%d/%d\n",
+                gBlockIndex + 1, (unsigned)gBlocks.size(), gXOffset, maxXFor(b), gYOffset, maxYFor(b));
 }
 
 void moveViewerUp() {
   if (gBlocks.empty()) return;
+  if (gYOffset > 0) {
+    gYOffset -= 32;
+    if (gYOffset < 0) gYOffset = 0;
+    return;
+  }
   if (gBlockIndex > 0) {
+    int previousX = gXOffset;
+    int previousWidth = gBlocks[gBlockIndex].width;
     gBlockIndex--;
-    gXOffset = 0;
+    gXOffset = (gBlocks[gBlockIndex].width == previousWidth)
+      ? min(previousX, maxXFor(gBlocks[gBlockIndex]))
+      : 0;
+    gYOffset = maxYFor(gBlocks[gBlockIndex]);
   }
 }
 
 void moveViewerDown() {
   if (gBlocks.empty()) return;
+  int maxY = maxYFor(gBlocks[gBlockIndex]);
+  if (gYOffset < maxY) {
+    gYOffset += 32;
+    if (gYOffset > maxY) gYOffset = maxY;
+    return;
+  }
   if (gBlockIndex < (int)gBlocks.size() - 1) {
+    int previousX = gXOffset;
+    int previousWidth = gBlocks[gBlockIndex].width;
     gBlockIndex++;
-    gXOffset = 0;
+    gXOffset = (gBlocks[gBlockIndex].width == previousWidth)
+      ? min(previousX, maxXFor(gBlocks[gBlockIndex]))
+      : 0;
+    gYOffset = 0;
   }
 }
 
@@ -231,8 +319,12 @@ void moveViewerLeft() {
     return;
   }
   if (gBlockIndex > 0) {
+    int previousWidth = gBlocks[gBlockIndex].width;
     gBlockIndex--;
-    gXOffset = maxXFor(gBlocks[gBlockIndex]);
+    gXOffset = (gBlocks[gBlockIndex].width == previousWidth)
+      ? 0
+      : maxXFor(gBlocks[gBlockIndex]);
+    gYOffset = maxYFor(gBlocks[gBlockIndex]);
   }
 }
 
@@ -245,8 +337,13 @@ void moveViewerRight() {
     return;
   }
   if (gBlockIndex < (int)gBlocks.size() - 1) {
+    int previousX = gXOffset;
+    int previousWidth = gBlocks[gBlockIndex].width;
     gBlockIndex++;
-    gXOffset = 0;
+    gXOffset = (gBlocks[gBlockIndex].width == previousWidth)
+      ? min(previousX, maxXFor(gBlocks[gBlockIndex]))
+      : 0;
+    gYOffset = 0;
   }
 }
 
@@ -258,6 +355,64 @@ int parseHttpStatusCode(const String& statusLine) {
     ? statusLine.substring(firstSpace + 1, secondSpace)
     : statusLine.substring(firstSpace + 1);
   return codeText.toInt();
+}
+
+String rawPreview(const String& raw, size_t maxLen = 200) {
+  String preview = raw.substring(0, min((int)raw.length(), (int)maxLen));
+  preview.replace("\r", "\\r");
+  preview.replace("\n", "\\n");
+  return preview;
+}
+
+bool parseRawHttpResponse(
+  const String& rawResp,
+  const char* tag,
+  int& outStatusCode,
+  String& outBody
+) {
+  outStatusCode = -1;
+  outBody = "";
+
+  if (rawResp.length() == 0) {
+    Serial.printf("[%s] empty raw response\n", tag);
+    return false;
+  }
+
+  int headerEnd = rawResp.indexOf("\r\n\r\n");
+  int bodyStart = headerEnd >= 0 ? headerEnd + 4 : -1;
+  if (headerEnd < 0) {
+    headerEnd = rawResp.indexOf("\n\n");
+    bodyStart = headerEnd >= 0 ? headerEnd + 2 : -1;
+  }
+
+  if (headerEnd >= 0) {
+    int statusEnd = rawResp.indexOf('\n');
+    if (statusEnd < 0 || statusEnd > headerEnd) statusEnd = headerEnd;
+
+    String statusLine = rawResp.substring(0, statusEnd);
+    statusLine.trim();
+    outStatusCode = parseHttpStatusCode(statusLine);
+    outBody = rawResp.substring(bodyStart);
+
+    Serial.printf("[%s] status=%d body_len=%u raw_len=%u\n",
+                  tag, outStatusCode, (unsigned)outBody.length(), (unsigned)rawResp.length());
+    if (outStatusCode <= 0) {
+      Serial.printf("[%s] bad status line: %s\n", tag, statusLine.c_str());
+      return false;
+    }
+    return true;
+  }
+
+  if (rawResp.startsWith("HTTP/")) {
+    Serial.printf("[%s] malformed HTTP response, no header separator. raw[0..200]=%s\n",
+                  tag, rawPreview(rawResp).c_str());
+    return false;
+  }
+
+  outStatusCode = 200;
+  outBody = rawResp;
+  Serial.printf("[%s] headerless body len=%u\n", tag, (unsigned)outBody.length());
+  return true;
 }
 
 bool connectWiFi() {
@@ -445,15 +600,7 @@ bool postUploadBinaryOnce(
     delay(20);
   }
   client.stop();
-  if (rawResp.length() == 0) return false;
-
-  int headerEnd = rawResp.indexOf("\r\n\r\n");
-  if (headerEnd < 0) return false;
-  String statusLine = rawResp.substring(0, rawResp.indexOf('\n'));
-  statusLine.trim();
-  outStatusCode = parseHttpStatusCode(statusLine);
-  outBody = rawResp.substring(headerEnd + 4);
-  return outStatusCode > 0;
+  return parseRawHttpResponse(rawResp, "UP", outStatusCode, outBody);
 }
 
 bool uploadPhotoToServer(
@@ -508,50 +655,203 @@ bool postSolve(const String& payload, int& outCode, String& outBody) {
     return false;
   }
 
-  String req;
-  req.reserve(512 + payload.length());
-  req += "POST ";
-  req += SOLVE_PATH;
-  req += " HTTP/1.0\r\n";
-  req += "Host: ";
-  req += SERVER_HOST;
-  req += "\r\nContent-Type: application/json\r\nConnection: close\r\n";
-  req += "X-Device-Id: ";
-  req += DEVICE_ID;
-  req += "\r\nX-Device-Api-Key: ";
-  req += DEVICE_API_KEY;
-  req += "\r\nContent-Length: ";
-  req += String(payload.length());
-  req += "\r\n\r\n";
+  String request;
+  request.reserve(512 + payload.length());
+  request += "POST ";
+  request += SOLVE_PATH;
+  request += " HTTP/1.0\r\n";
+  request += "Host: ";
+  request += SERVER_HOST;
+  request += "\r\nContent-Type: application/json\r\nConnection: close\r\n";
+  request += "X-Device-Id: ";
+  request += DEVICE_ID;
+  request += "\r\nX-Device-Api-Key: ";
+  request += DEVICE_API_KEY;
+  request += "\r\nContent-Length: ";
+  request += String(payload.length());
+  request += "\r\n\r\n";
 
-  client.print(req);
+  client.print(request);
   client.print(payload);
 
-  String rawResp = "";
+  String rawResp;
+  rawResp.reserve(4096);
   unsigned long lastDataAt = millis();
+  unsigned long startedAt = millis();
   while (true) {
     while (client.available()) {
       rawResp += (char)client.read();
       lastDataAt = millis();
     }
+
     if (!client.connected() && !client.available()) break;
+    if ((millis() - startedAt) > SOLVE_TIMEOUT_MS) {
+      Serial.printf("[SOLVE] raw wait timeout raw_len=%u\n", (unsigned)rawResp.length());
+      client.stop();
+      return false;
+    }
     if ((millis() - lastDataAt) > SOLVE_TIMEOUT_MS) {
+      Serial.printf("[SOLVE] raw idle timeout raw_len=%u\n", (unsigned)rawResp.length());
       client.stop();
       return false;
     }
     delay(20);
   }
   client.stop();
-  if (rawResp.length() == 0) return false;
 
-  int headerEnd = rawResp.indexOf("\r\n\r\n");
-  if (headerEnd < 0) return false;
+  bool parsed = parseRawHttpResponse(rawResp, "SOLVE", outCode, outBody);
+  Serial.printf("[SOLVE] raw code=%d body_len=%u raw_len=%u\n",
+                outCode, (unsigned)outBody.length(), (unsigned)rawResp.length());
+  return parsed && outCode > 0;
+}
 
-  String statusLine = rawResp.substring(0, rawResp.indexOf('\n'));
-  statusLine.trim();
-  outCode = parseHttpStatusCode(statusLine);
-  outBody = rawResp.substring(headerEnd + 4);
+bool fetchQuestionResultOnce(int questionId, int& outCode, String& outBody) {
+  outCode = -1;
+  outBody = "";
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(HTTP_TIMEOUT_MS / 1000);
+
+  HTTPClient http;
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  http.setReuse(false);
+
+  String url = String("https://") + SERVER_HOST + QUESTION_RESULT_PATH +
+               "?question_id=" + String(questionId);
+  if (!http.begin(client, url)) {
+    Serial.println("[RESULT] HTTP begin failed");
+    return false;
+  }
+
+  http.addHeader("Connection", "close");
+  http.addHeader("X-Device-Id", DEVICE_ID);
+  http.addHeader("X-Device-Api-Key", DEVICE_API_KEY);
+
+  outCode = http.GET();
+  outBody = http.getString();
+  Serial.printf("[RESULT] httpclient code=%d body_len=%u\n",
+                outCode, (unsigned)outBody.length());
+  http.end();
+
   return outCode > 0;
+}
+
+bool fetchQuestionResultWithRetry(int questionId, String& outBody, int& outCode) {
+  unsigned long startedAt = millis();
+  int attempt = 1;
+  while ((millis() - startedAt) <= RESULT_FETCH_TOTAL_WAIT_MS) {
+    int code = -1;
+    String body;
+    unsigned long t0 = millis();
+    bool ok = fetchQuestionResultOnce(questionId, code, body);
+    Serial.printf("[TIME] result_fetch_%d=%lums ok=%d code=%d\n",
+                  attempt, (unsigned long)(millis() - t0), ok ? 1 : 0, code);
+    if (ok) {
+      JsonDocument statusDoc;
+      DeserializationError err = deserializeJson(statusDoc, body);
+      if (!err && (statusDoc["ok"] | false)) {
+        outBody = body;
+        outCode = code;
+        return true;
+      }
+
+      String status = String((const char*)(statusDoc["status"] | ""));
+      String error = String((const char*)(statusDoc["error"] | ""));
+      Serial.printf("[RESULT] not ready attempt=%d status=%s error=%s\n",
+                    attempt, status.c_str(), error.c_str());
+
+      if (status == "FAILED" || code >= 500) {
+        outBody = body;
+        outCode = code;
+        return true;
+      }
+    }
+    if (body.length() > 0) {
+      Serial.printf("[RESULT] body[0..200]=%s\n", rawPreview(body).c_str());
+    }
+    attempt++;
+    delay(RESULT_FETCH_RETRY_DELAY_MS);
+  }
+  return false;
+}
+
+bool fetchQuestionBlockOnce(int questionId, int blockIndex, int& outCode, String& outBody) {
+  outCode = -1;
+  outBody = "";
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(HTTP_TIMEOUT_MS / 1000);
+
+  HTTPClient http;
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  http.setReuse(false);
+
+  String url = String("https://") + SERVER_HOST + QUESTION_BLOCK_PATH +
+               "?question_id=" + String(questionId) +
+               "&index=" + String(blockIndex);
+  if (!http.begin(client, url)) {
+    Serial.println("[BLOCK] HTTP begin failed");
+    return false;
+  }
+
+  http.addHeader("Connection", "close");
+  http.addHeader("X-Device-Id", DEVICE_ID);
+  http.addHeader("X-Device-Api-Key", DEVICE_API_KEY);
+
+  outCode = http.GET();
+  outBody = http.getString();
+  Serial.printf("[BLOCK] httpclient index=%d code=%d body_len=%u\n",
+                blockIndex, outCode, (unsigned)outBody.length());
+  http.end();
+
+  return outCode > 0;
+}
+
+bool fetchQuestionBlockWithRetry(int questionId, int blockIndex, DisplayBlock& outBlock) {
+  unsigned long startedAt = millis();
+  int attempt = 1;
+  while ((millis() - startedAt) <= RESULT_FETCH_TOTAL_WAIT_MS) {
+    int code = -1;
+    String body;
+    bool ok = fetchQuestionBlockOnce(questionId, blockIndex, code, body);
+    if (ok && code >= 200 && code < 300) {
+      JsonDocument doc;
+      DeserializationError err = deserializeJson(doc, body);
+      if (!err && (doc["ok"] | false)) {
+        if (parseDisplayBlockItem(doc["block"], blockIndex + 1, outBlock)) {
+          return true;
+        }
+      } else {
+        Serial.printf("[BLOCK] json failed index=%d err=%s body[0..120]=%s\n",
+                      blockIndex, err ? err.c_str() : "api_not_ok", rawPreview(body, 120).c_str());
+      }
+    }
+    attempt++;
+    delay(RESULT_FETCH_RETRY_DELAY_MS);
+  }
+  return false;
+}
+
+bool fetchQuestionBlocksWithRetry(int questionId, int blockCount, std::vector<DisplayBlock>& outBlocks) {
+  outBlocks.clear();
+  if (blockCount <= 0) return false;
+  outBlocks.reserve(blockCount);
+
+  for (int index = 0; index < blockCount; index++) {
+    DisplayBlock block;
+    if (!fetchQuestionBlockWithRetry(questionId, index, block)) {
+      Serial.printf("[BLOCK] failed to fetch block %d/%d\n", index + 1, blockCount);
+      outBlocks.clear();
+      return false;
+    }
+    outBlocks.push_back(std::move(block));
+  }
+
+  Serial.printf("[BLOCK] fetched display_blocks=%u/%d\n",
+                (unsigned)outBlocks.size(), blockCount);
+  return !outBlocks.empty();
 }
 
 void setup() {
@@ -565,7 +865,7 @@ void setup() {
   Wire.setClock(100000);
   u8g2.setI2CAddress(0x3C * 2);
   u8g2.begin();
-  u8g2.setContrast(12);
+  u8g2.setContrast(OLED_CONTRAST);
 
   btnUp.begin(BTN_SCROLL_UP);
   btnDown.begin(BTN_SCROLL_DOWN);
@@ -596,6 +896,10 @@ void setup() {
   Serial.println("[STEP] upload ok");
   drawTwoLines("Upload OK", "Solving...");
   Serial.printf("[TEST] upload ok photo_id=%s\n", photoId.c_str());
+  jpeg.clear();
+  jpeg.shrink_to_fit();
+  Serial.printf("[MEM] jpeg freed before solve heap=%u psram=%u\n",
+                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram());
 
   JsonDocument req;
   req["device_id"] = DEVICE_ID;
@@ -621,10 +925,16 @@ void setup() {
   Serial.println("[TEST] solve raw body:");
   Serial.println(body);
 
-  if (!transportOk || code < 200 || code >= 300) {
-    Serial.println("[TEST] solve failed");
-    drawTwoLines("Solve failed", "transport/http");
-    return;
+  if (!transportOk || code == 202 || code < 200 || code >= 300) {
+    Serial.println("[TEST] solve pending/failed, trying result fetch fallback");
+    bool fetched = fetchQuestionResultWithRetry(questionId, body, code);
+    if (!fetched) {
+      Serial.println("[TEST] result fetch failed");
+      drawTwoLines("Solve failed", "no result");
+      return;
+    }
+    Serial.println("[TEST] result fetch ok body:");
+    Serial.println(body);
   }
   Serial.println("[STEP] solve transport ok");
 
@@ -632,8 +942,17 @@ void setup() {
   DeserializationError err = deserializeJson(resp, body);
   if (err) {
     Serial.printf("[TEST] solve json parse failed: %s\n", err.c_str());
-    drawTwoLines("Solve failed", "json parse");
-    return;
+    Serial.println("[TEST] trying result fetch after json parse failure");
+    if (!fetchQuestionResultWithRetry(questionId, body, code)) {
+      drawTwoLines("Solve failed", "json parse");
+      return;
+    }
+    err = deserializeJson(resp, body);
+    if (err) {
+      Serial.printf("[TEST] fetched result json parse failed: %s\n", err.c_str());
+      drawTwoLines("Solve failed", "json parse");
+      return;
+    }
   }
 
   bool apiOk = resp["ok"] | false;
@@ -653,6 +972,13 @@ void setup() {
 
   std::vector<DisplayBlock> blocks;
   bool hasBlocks = parseDisplayBlocks(resp["display_blocks"], blocks);
+  int displayBlockCount = resp["display_block_count"] | 0;
+  bool displayBlocksInline = resp["display_blocks_inline"] | true;
+  if (!hasBlocks && displayBlockCount > 0) {
+    Serial.printf("[TEST] inline blocks unavailable inline=%d count=%d; fetching blocks\n",
+                  displayBlocksInline ? 1 : 0, displayBlockCount);
+    hasBlocks = fetchQuestionBlocksWithRetry(questionId, displayBlockCount, blocks);
+  }
   Serial.printf("[TEST] display_blocks parsed=%d count=%u\n", hasBlocks ? 1 : 0, (unsigned)blocks.size());
 
   if (hasBlocks) {
@@ -662,6 +988,7 @@ void setup() {
     gViewerActive = true;
     gBlockIndex = 0;
     gXOffset = 0;
+    gYOffset = 0;
     renderCurrentBlock();
   } else {
     std::vector<String> lines = wrapTwoLines(answer);
@@ -699,4 +1026,3 @@ void loop() {
   if (changed) renderCurrentBlock();
   delay(20);
 }
-

@@ -5,14 +5,10 @@
 #include <Wire.h>
 #include <U8g2lib.h>
 #include "esp_camera.h"
+#include "casio_config.h"
 
-// =====================================================
-// USER CONFIG
-// =====================================================
-const char* WIFI_SSID = "Henry Teo";
-const char* WIFI_PASS = "henrycute";
-const char* AP_SSID = "CasioCamTune";
-const char* AP_PASS = "12345678";
+const char* const AP_SSID = "CasioCamTune";
+const char* const AP_PASS = "";
 
 // =====================================================
 // PIN CONFIG

@@ -3,3 +3,9 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+.env.local
+include/generated_env_config.h
+test/logs/
+test/logs-result/
+*.log

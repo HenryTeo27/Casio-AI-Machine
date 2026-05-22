@@ -24,7 +24,13 @@
     "test/**/*.c",
     "test/**/*.cpp",
     "test/**/*.h",
-    "test/**/*.hpp"
+    "test/**/*.hpp",
+    "server/README.md",
+    "server/app/api/**/*.ts",
+    "server/app/utils/casioFontconfig.ts",
+    "server/prisma/**/*.sql",
+    "server/prisma/**/*.prisma",
+    "server/utils/prisma.ts"
   ],
   "ignore": {
     "useGitignore": true,
@@ -55,6 +61,11 @@
       "*.jpeg",
       "*.webp",
       "*.gif",
+      "*.otf",
+      "*.ttf",
+      "*.woff",
+      "*.woff2",
+      "server/app/utils/fonts/**",
       "*.zip",
       "*.tar",
       "*.gz"
