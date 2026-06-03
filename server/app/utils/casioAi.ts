@@ -857,7 +857,7 @@ function validateAiBitmapBlocks(rawBlocks: unknown): CasioDisplayBlock[] {
             const block = rawBlock as JsonObject;
             const type = safeText(block.type);
             const rawKind = safeText(block.kind).toLowerCase();
-            const kind = rawKind === "formula" ? "formula" : "text";
+            const kind = rawKind === "formula" ? rawKind : "text";
             const width = Number(block.width);
             const height = Number(block.height);
             const format = safeText(block.format);
@@ -895,6 +895,36 @@ function validateAiBitmapBlocks(rawBlocks: unknown): CasioDisplayBlock[] {
     }
 
     return output;
+}
+
+function compactCoverageText(value: string): string {
+    return safeText(value).replace(/\s+/g, "");
+}
+
+function isOledLayoutSufficientForAnswer(args: {
+    answer: string;
+    layoutText: string;
+    displayBlocks: CasioDisplayBlock[];
+}): boolean {
+    const answerText = compactCoverageText(args.answer);
+    if (answerText.length < 700) return true;
+
+    const layoutText = compactCoverageText(args.layoutText);
+    if (!layoutText) return false;
+
+    const minimumLayoutChars = Math.max(
+        260,
+        Math.floor(answerText.length * 0.45)
+    );
+    const minimumDisplayBlocks = Math.max(
+        5,
+        Math.floor(answerText.length / 280)
+    );
+
+    return (
+        layoutText.length >= minimumLayoutChars ||
+        args.displayBlocks.length >= minimumDisplayBlocks
+    );
 }
 
 function countSetBits(byte: number): number {
@@ -1310,14 +1340,20 @@ export async function renderCasioAnswerForOledWithOpenAi(args: {
                     : null;
             const parsed = parseJsonFromModelText(contentText) || outputParsed;
             const layout = parsed?.oled_layout;
+            const layoutDisplayText = getDisplayTextFromOledLayout(layout);
 
             displayBlocks = await buildDisplayBlocksFromOledLayout(layout);
             displayBlocks = normalizeOledPolarity(displayBlocks);
             layoutUsage = normalizeUsage(call.payload.usage);
             displayTextRaw =
                 safeText(parsed?.display_text) ||
-                getDisplayTextFromOledLayout(layout) ||
+                layoutDisplayText ||
                 displayTextRaw;
+            const layoutLooksSufficient = isOledLayoutSufficientForAnswer({
+                answer: args.answer,
+                layoutText: layoutDisplayText || safeText(parsed?.display_text),
+                displayBlocks
+            });
 
             console.log(`${LOG_PREFIX} server_oled_layout_render_done`, {
                 ms: Date.now() - layoutStartedAt,
@@ -1326,11 +1362,22 @@ export async function renderCasioAnswerForOledWithOpenAi(args: {
                 mode: attempt.mode,
                 layoutBlocks: Array.isArray(layout) ? layout.length : 0,
                 displayBlocks: displayBlocks.length,
+                layoutTextChars: layoutDisplayText.length,
+                layoutLooksSufficient,
                 answerChars: args.answer.length,
                 source: "openai_prompt_layout"
             });
 
-            if (displayBlocks.length) break;
+            if (displayBlocks.length && layoutLooksSufficient) break;
+            if (displayBlocks.length && !layoutLooksSufficient) {
+                console.warn(`${LOG_PREFIX} oled_layout_incomplete_retry`, {
+                    attempt: attemptIndex + 1,
+                    answerChars: args.answer.length,
+                    layoutTextChars: layoutDisplayText.length,
+                    displayBlocks: displayBlocks.length
+                });
+                displayBlocks = [];
+            }
         } catch (error) {
             console.warn(`${LOG_PREFIX} openai_prompt_layout_attempt_failed`, {
                 attempt: attemptIndex + 1,
