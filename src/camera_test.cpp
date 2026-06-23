@@ -46,7 +46,9 @@ static constexpr int PHOTO_INDEX = 0;
 static constexpr uint32_t START_CAPTURE_DELAY_MS = 0;
 static constexpr uint32_t SENSOR_SETTLE_MS = 2500;
 static constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 30000;
-static constexpr uint32_t HTTP_TIMEOUT_MS = 20000;
+static constexpr uint32_t HTTP_TIMEOUT_MS = 60000;
+static constexpr int UPLOAD_RETRY_COUNT = 3;
+static constexpr uint32_t UPLOAD_RETRY_DELAY_MS = 900;
 
 U8G2_SSD1305_128X32_NONAME_F_HW_I2C u8g2(U8G2_R0, OLED_RST);
 framesize_t activeFrameSize = FRAMESIZE_SVGA;
@@ -96,6 +98,33 @@ bool connectWiFi() {
   return true;
 }
 
+bool ensureWiFiConnected() {
+  if (WiFi.status() == WL_CONNECTED) return true;
+
+  Serial.printf("[WARN] WiFi disconnected before upload, status=%d. Reconnecting...\n", (int)WiFi.status());
+  WiFi.disconnect(false, false);
+  delay(200);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
+    delay(250);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.printf("[ERR] WiFi reconnect failed, status=%d\n", (int)WiFi.status());
+    return false;
+  }
+
+  Serial.print("[OK] WiFi reconnected: ");
+  Serial.println(WiFi.localIP());
+  return true;
+}
+
 void applyTextProfile(int aeLevel, int brightness, gainceiling_t gainCeiling) {
   sensor_t* s = esp_camera_sensor_get();
   if (!s) return;
@@ -122,8 +151,8 @@ void applyTextProfile(int aeLevel, int brightness, gainceiling_t gainCeiling) {
 
 bool initCamera() {
   bool hasPsram = psramFound();
-  activeFrameSize = hasPsram ? FRAMESIZE_UXGA : FRAMESIZE_SVGA;
-  activeJpegQuality = 8;
+  activeFrameSize = FRAMESIZE_SVGA;
+  activeJpegQuality = 10;
 
   Serial.printf("[INFO] psramFound=%d freePsram=%u\n", hasPsram, ESP.getFreePsram());
 
@@ -154,9 +183,7 @@ bool initCamera() {
   config.fb_location = hasPsram ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
   config.grab_mode = CAMERA_GRAB_LATEST;
 
-  if (!hasPsram) {
-    Serial.println("[WARN] PSRAM not found, fallback SVGA/DRAM");
-  }
+  Serial.println("[INFO] Camera test uses SVGA/800x600 for faster proof shots");
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
@@ -215,46 +242,143 @@ void coolDownAndSleep(const String& line1, const String& line2) {
   esp_deep_sleep_start();
 }
 
-bool uploadPhotoToServer(const uint8_t* jpegData, size_t jpegLen, String& outPhotoId) {
+bool parseRawHttpResponse(const String& rawResp, int& outStatusCode, String& outBody) {
+  outStatusCode = -1;
+  outBody = "";
+
+  int firstLineEnd = rawResp.indexOf('\n');
+  if (firstLineEnd <= 0) return false;
+
+  String statusLine = rawResp.substring(0, firstLineEnd);
+  statusLine.trim();
+  int firstSpace = statusLine.indexOf(' ');
+  if (firstSpace < 0 || statusLine.length() < firstSpace + 4) return false;
+  outStatusCode = statusLine.substring(firstSpace + 1, firstSpace + 4).toInt();
+
+  int headerEnd = rawResp.indexOf("\r\n\r\n");
+  int bodyStart = headerEnd >= 0 ? headerEnd + 4 : -1;
+  if (bodyStart < 0) {
+    headerEnd = rawResp.indexOf("\n\n");
+    bodyStart = headerEnd >= 0 ? headerEnd + 2 : -1;
+  }
+  if (bodyStart < 0) return false;
+
+  outBody = rawResp.substring(bodyStart);
+  outBody.trim();
+  return true;
+}
+
+bool postUploadBinaryOnce(const uint8_t* jpegData, size_t jpegLen, int& outStatusCode, String& outBody) {
+  outStatusCode = -1;
+  outBody = "";
+
   WiFiClientSecure client;
   client.setInsecure();
   client.setTimeout(HTTP_TIMEOUT_MS / 1000);
 
-  String url = String(SERVER_BASE_URL) + UPLOAD_PHOTO_PATH +
-               "?question_id=" + String(QUESTION_ID) +
-               "&index=" + String(PHOTO_INDEX);
-
-  HTTPClient http;
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  if (!http.begin(client, url)) {
-    Serial.println("[ERR] Upload begin failed");
+  if (!client.connect(SERVER_HOST, 443)) {
+    Serial.println("[ERR] TLS connect failed");
     return false;
   }
 
-  http.addHeader("Content-Type", "image/jpeg");
-  http.addHeader("X-Device-Id", DEVICE_ID);
-  http.addHeader("X-Device-Api-Key", DEVICE_API_KEY);
-  http.addHeader("X-Question-Id", String(QUESTION_ID));
-  http.addHeader("X-Photo-Index", String(PHOTO_INDEX));
+  String path = String(UPLOAD_PHOTO_PATH) +
+                "?question_id=" + String(QUESTION_ID) +
+                "&index=" + String(PHOTO_INDEX);
 
-  int code = http.POST((uint8_t*)jpegData, jpegLen);
-  String body = http.getString();
-  http.end();
+  String req;
+  req.reserve(420);
+  req += "POST ";
+  req += path;
+  req += " HTTP/1.0\r\nHost: ";
+  req += SERVER_HOST;
+  req += "\r\nContent-Type: image/jpeg\r\nConnection: close\r\n";
+  req += "X-Device-Id: ";
+  req += DEVICE_ID;
+  req += "\r\nX-Device-Api-Key: ";
+  req += DEVICE_API_KEY;
+  req += "\r\nX-Question-Id: ";
+  req += String(QUESTION_ID);
+  req += "\r\nX-Photo-Index: ";
+  req += String(PHOTO_INDEX);
+  req += "\r\nContent-Length: ";
+  req += String(jpegLen);
+  req += "\r\n\r\n";
 
-  Serial.printf("[INFO] upload code=%d\n", code);
-  Serial.println(body);
+  client.print(req);
 
-  if (code < 200 || code >= 300) return false;
+  size_t sent = 0;
+  const size_t chunkSize = 1024;
+  unsigned long lastWriteAt = millis();
+  while (sent < jpegLen) {
+    size_t want = min(chunkSize, jpegLen - sent);
+    size_t wrote = client.write(jpegData + sent, want);
+    if (wrote == 0) {
+      if (millis() - lastWriteAt > HTTP_TIMEOUT_MS) {
+        Serial.printf("[ERR] Upload write timeout sent=%u/%u\n", (unsigned)sent, (unsigned)jpegLen);
+        client.stop();
+        return false;
+      }
+      delay(5);
+      continue;
+    }
+    sent += wrote;
+    lastWriteAt = millis();
+    delay(1);
+  }
 
-  JsonDocument doc;
-  if (deserializeJson(doc, body)) return false;
+  String rawResp;
+  unsigned long lastDataAt = millis();
+  while (true) {
+    while (client.available()) {
+      rawResp += (char)client.read();
+      lastDataAt = millis();
+    }
+    if (!client.connected() && !client.available()) break;
+    if (millis() - lastDataAt > HTTP_TIMEOUT_MS) {
+      Serial.println("[ERR] Upload response timeout");
+      client.stop();
+      return false;
+    }
+    delay(10);
+  }
 
-  bool ok = doc["ok"] | false;
-  const char* photoId = doc["photo_id"] | "";
-  if (!ok || strlen(photoId) == 0) return false;
+  client.stop();
+  return parseRawHttpResponse(rawResp, outStatusCode, outBody);
+}
 
-  outPhotoId = String(photoId);
-  return true;
+bool uploadPhotoToServer(const uint8_t* jpegData, size_t jpegLen, String& outPhotoId) {
+  for (int attempt = 1; attempt <= UPLOAD_RETRY_COUNT; attempt++) {
+    if (!ensureWiFiConnected()) return false;
+
+    int code = -1;
+    String body;
+    Serial.printf("[INFO] upload attempt %d/%d bytes=%u\n",
+                  attempt, UPLOAD_RETRY_COUNT, (unsigned)jpegLen);
+    bool posted = postUploadBinaryOnce(jpegData, jpegLen, code, body);
+
+    Serial.printf("[INFO] upload posted=%d code=%d\n", posted ? 1 : 0, code);
+    if (body.length()) Serial.println(body);
+
+    if (posted && code >= 200 && code < 300) {
+      JsonDocument doc;
+      if (!deserializeJson(doc, body)) {
+        bool ok = doc["ok"] | false;
+        const char* photoId = doc["photo_id"] | "";
+        if (ok && strlen(photoId) > 0) {
+          outPhotoId = String(photoId);
+          return true;
+        }
+      }
+    }
+
+    WiFi.disconnect(false, false);
+    delay(150);
+    WiFi.reconnect();
+    delay(UPLOAD_RETRY_DELAY_MS);
+  }
+
+  Serial.println("[ERR] upload failed after retries");
+  return false;
 }
 
 void freeCapturedJpeg(CapturedJpeg& jpeg) {
@@ -351,7 +475,7 @@ void runOneShotFlow() {
 
   CapturedJpeg best;
 
-  if (!captureCandidate("clean UXGA", 2, 1, GAINCEILING_2X, best)) {
+  if (!captureCandidate("clean SVGA", 2, 1, GAINCEILING_2X, best)) {
     esp_camera_deinit();
     coolDownAndSleep("Capture failed", "No frame buffer");
     return;
