@@ -1,4 +1,4 @@
-#include <Arduino.h>
+﻿#include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <U8g2lib.h>
@@ -108,7 +108,7 @@ String rawPreview(const String& raw,size_t maxLen=160){ String p=raw.substring(0
 std::vector<String> wrapFallbackLines(const String& text,int maxChars=20){ std::vector<String> out; String s=text; s.replace("\r",""); s.replace("\n"," "); s.trim(); while(s.length()){ int n=min(maxChars,(int)s.length()); out.push_back(s.substring(0,n)); s=s.substring(n); } if(out.empty()) out.push_back(""); return out; }
 void showError(const String& e){ lastError=safeShort(e,21); Serial.printf("[ERR] %s\n",e.c_str()); setScreenMode(MODE_ERROR); }
 void freePendingPhoto(PendingPhoto& p){ if(p.data){ free(p.data); p.data=nullptr; } p.len=0; p.width=0; p.height=0; }
-bool isWorkingStatus(const String& s){ return s=="DRAFT"||s=="UPLOADING"||s=="UPLOADED"||s=="PROCESSING"||s=="ANSWER_READY"||s=="RENDERING"; }
+bool isWorkingStatus(const String& s){ return s=="DRAFT"||s=="CREATING"||s=="QUEUED"||s=="UPLOADING"||s=="UPLOADED"||s=="PROCESSING"||s=="ANSWER_READY"||s=="RENDERING"; }
 int findQuestionIndexById(const String& id){ for(int i=0;i<(int)questionList.size();i++) if(questionList[i].id==id) return i; return -1; }
 void removeQuestionItemById(const String& id){ int idx=findQuestionIndexById(id); if(idx>=0) questionList.erase(questionList.begin()+idx); selectedIndex=min(selectedIndex,max(0,(int)questionList.size()-1)); }
 void upsertQuestionItem(const QuestionItem& in,bool preserveDetail=true){
@@ -281,7 +281,7 @@ bool apiFetchQuestionDetail(const String& qid,bool wantBlocks){
 }
 
 void cleanupFinishedDrafts();
-bool initCamera(){ camera_config_t c={}; bool ps=psramFound(); c.ledc_channel=LEDC_CHANNEL_0; c.ledc_timer=LEDC_TIMER_0; c.pin_d0=CAM_PIN_D0; c.pin_d1=CAM_PIN_D1; c.pin_d2=CAM_PIN_D2; c.pin_d3=CAM_PIN_D3; c.pin_d4=CAM_PIN_D4; c.pin_d5=CAM_PIN_D5; c.pin_d6=CAM_PIN_D6; c.pin_d7=CAM_PIN_D7; c.pin_xclk=CAM_PIN_XCLK; c.pin_pclk=CAM_PIN_PCLK; c.pin_vsync=CAM_PIN_VSYNC; c.pin_href=CAM_PIN_HREF; c.pin_sccb_sda=CAM_PIN_SIOD; c.pin_sccb_scl=CAM_PIN_SIOC; c.pin_pwdn=CAM_PIN_PWDN; c.pin_reset=CAM_PIN_RESET; c.xclk_freq_hz=20000000; c.pixel_format=PIXFORMAT_JPEG; c.frame_size=ps?FRAMESIZE_SXGA:FRAMESIZE_XGA; c.jpeg_quality=CAM_CAPTURE_JPEG_QUALITY; c.fb_count=1; c.fb_location=ps?CAMERA_FB_IN_PSRAM:CAMERA_FB_IN_DRAM; c.grab_mode=CAMERA_GRAB_LATEST; if(esp_camera_init(&c)!=ESP_OK) return false; sensor_t* s=esp_camera_sensor_get(); if(s){ s->set_framesize(s,ps?FRAMESIZE_SXGA:FRAMESIZE_XGA); s->set_quality(s,CAM_CAPTURE_JPEG_QUALITY); s->set_whitebal(s,1); s->set_awb_gain(s,1); s->set_wb_mode(s,0); s->set_brightness(s,1); s->set_contrast(s,2); s->set_saturation(s,0); s->set_exposure_ctrl(s,1); s->set_gain_ctrl(s,1); s->set_aec2(s,1); s->set_ae_level(s,2); s->set_gainceiling(s,GAINCEILING_2X); if(s->set_sharpness)s->set_sharpness(s,-2); if(s->set_denoise)s->set_denoise(s,2); if(s->set_bpc)s->set_bpc(s,1); if(s->set_wpc)s->set_wpc(s,1); if(s->set_lenc)s->set_lenc(s,1); if(s->set_raw_gma)s->set_raw_gma(s,1); if(s->set_vflip)s->set_vflip(s,1); if(s->set_hmirror)s->set_hmirror(s,0); } cameraSessionOn=true; Serial.printf("[CAM] init ok frame=%s q=%d\n",ps?"SXGA":"XGA",CAM_CAPTURE_JPEG_QUALITY); return true; }
+bool initCamera(){ camera_config_t c={}; bool ps=psramFound(); c.ledc_channel=LEDC_CHANNEL_0; c.ledc_timer=LEDC_TIMER_0; c.pin_d0=CAM_PIN_D0; c.pin_d1=CAM_PIN_D1; c.pin_d2=CAM_PIN_D2; c.pin_d3=CAM_PIN_D3; c.pin_d4=CAM_PIN_D4; c.pin_d5=CAM_PIN_D5; c.pin_d6=CAM_PIN_D6; c.pin_d7=CAM_PIN_D7; c.pin_xclk=CAM_PIN_XCLK; c.pin_pclk=CAM_PIN_PCLK; c.pin_vsync=CAM_PIN_VSYNC; c.pin_href=CAM_PIN_HREF; c.pin_sccb_sda=CAM_PIN_SIOD; c.pin_sccb_scl=CAM_PIN_SIOC; c.pin_pwdn=CAM_PIN_PWDN; c.pin_reset=CAM_PIN_RESET; c.xclk_freq_hz=20000000; c.pixel_format=PIXFORMAT_JPEG; c.frame_size=ps?FRAMESIZE_SXGA:FRAMESIZE_XGA; c.jpeg_quality=CAM_CAPTURE_JPEG_QUALITY; c.fb_count=1; c.fb_location=ps?CAMERA_FB_IN_PSRAM:CAMERA_FB_IN_DRAM; c.grab_mode=CAMERA_GRAB_LATEST; if(esp_camera_init(&c)!=ESP_OK) return false; sensor_t* s=esp_camera_sensor_get(); if(s){ s->set_framesize(s,ps?FRAMESIZE_SXGA:FRAMESIZE_XGA); s->set_quality(s,CAM_CAPTURE_JPEG_QUALITY); s->set_whitebal(s,1); s->set_awb_gain(s,1); s->set_wb_mode(s,0); s->set_brightness(s,2); s->set_contrast(s,2); s->set_saturation(s,0); s->set_exposure_ctrl(s,1); s->set_gain_ctrl(s,1); s->set_aec2(s,1); s->set_ae_level(s,2); s->set_gainceiling(s,GAINCEILING_2X); if(s->set_sharpness)s->set_sharpness(s,-2); if(s->set_denoise)s->set_denoise(s,2); if(s->set_bpc)s->set_bpc(s,1); if(s->set_wpc)s->set_wpc(s,1); if(s->set_lenc)s->set_lenc(s,1); if(s->set_raw_gma)s->set_raw_gma(s,1); if(s->set_vflip)s->set_vflip(s,1); if(s->set_hmirror)s->set_hmirror(s,0); } cameraSessionOn=true; Serial.printf("[CAM] init ok frame=%s q=%d\n",ps?"SXGA":"XGA",CAM_CAPTURE_JPEG_QUALITY); return true; }
 void sensorStandby(){ sensor_t* s=esp_camera_sensor_get(); if(s&&s->set_reg){ s->set_reg(s,0x3008,0xFF,0x42); delay(80); } }
 void quietCameraPins(){ pinMode(CAM_PIN_XCLK,OUTPUT); digitalWrite(CAM_PIN_XCLK,LOW); const int pins[]={CAM_PIN_SIOD,CAM_PIN_SIOC,CAM_PIN_D0,CAM_PIN_D1,CAM_PIN_D2,CAM_PIN_D3,CAM_PIN_D4,CAM_PIN_D5,CAM_PIN_D6,CAM_PIN_D7,CAM_PIN_VSYNC,CAM_PIN_HREF,CAM_PIN_PCLK}; for(int p:pins) if(p>=0) pinMode(p,INPUT); }
 void stopCameraForCooling(){ if(cameraSessionOn){ sensorStandby(); esp_camera_deinit(); cameraSessionOn=false; } quietCameraPins(); }
@@ -310,6 +310,7 @@ bool pickQuestionBlocksForPoll(int i,unsigned long now,String& qid,bool& want,bo
 
 bool pickQuestionStatusForPoll(int i,unsigned long now,String& qid,bool& want){
   if(i<0||i>=(int)questionList.size()) return false;
+  if(questionList[i].id.startsWith("draft:")) return false;
   if(!isWorkingStatus(questionList[i].status)) return false;
   if(questionList[i].nextPollMs>now) return false;
   bool selected=i==selectedIndex&&screenMode==MODE_VIEW;

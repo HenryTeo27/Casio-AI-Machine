@@ -1,4 +1,4 @@
-#include <Arduino.h>
+﻿#include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
@@ -37,22 +37,60 @@ static constexpr int CAM_PIN_D0 = 11;
 static constexpr int CAM_PIN_VSYNC = 6;
 static constexpr int CAM_PIN_HREF = 7;
 static constexpr int CAM_PIN_PCLK = 13;
+static constexpr int BTN_CAMERA = 38;
 
 // =====================================================
 // SYSTEM CONFIG
 // =====================================================
 static constexpr int QUESTION_ID = 9001;
-static constexpr int PHOTO_INDEX = 0;
-static constexpr uint32_t START_CAPTURE_DELAY_MS = 0;
-static constexpr uint32_t SENSOR_SETTLE_MS = 2500;
+static constexpr uint32_t CAM_SETTLE_AFTER_INIT_MS = 500;
+static constexpr int CAM_WARMUP_FRAMES = 3;
+static constexpr uint32_t CAM_WARMUP_DELAY_MS = 180;
+static constexpr int CAM_CAPTURE_JPEG_QUALITY = 10;
+static constexpr int CAM_WARMUP_JPEG_QUALITY = 12;
+static constexpr int CAM_FALLBACK_JPEG_QUALITY = 12;
+static constexpr int CAM_CAPTURE_RETRIES = 3;
 static constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 30000;
 static constexpr uint32_t HTTP_TIMEOUT_MS = 60000;
 static constexpr int UPLOAD_RETRY_COUNT = 3;
 static constexpr uint32_t UPLOAD_RETRY_DELAY_MS = 900;
+static constexpr uint32_t BUTTON_DEBOUNCE_MS = 22;
 
 U8G2_SSD1305_128X32_NONAME_F_HW_I2C u8g2(U8G2_R0, OLED_RST);
-framesize_t activeFrameSize = FRAMESIZE_SVGA;
-int activeJpegQuality = 8;
+framesize_t activeFrameSize = FRAMESIZE_SXGA;
+int activeJpegQuality = CAM_CAPTURE_JPEG_QUALITY;
+int nextPhotoIndex = 0;
+bool captureBusy = false;
+
+struct Button {
+  int pin = -1;
+  bool lastRead = HIGH;
+  bool lastStable = HIGH;
+  unsigned long lastChange = 0;
+
+  void begin(int p) {
+    pin = p;
+    pinMode(pin, INPUT_PULLUP);
+    lastRead = digitalRead(pin);
+    lastStable = lastRead;
+    lastChange = millis();
+  }
+
+  bool fell() {
+    bool reading = digitalRead(pin);
+    if (reading != lastRead) {
+      lastRead = reading;
+      lastChange = millis();
+    }
+    if ((millis() - lastChange) >= BUTTON_DEBOUNCE_MS && reading != lastStable) {
+      lastStable = reading;
+      return lastStable == LOW;
+    }
+    return false;
+  }
+};
+
+Button btnCamera;
 
 struct CapturedJpeg {
   uint8_t* data = nullptr;
@@ -125,7 +163,7 @@ bool ensureWiFiConnected() {
   return true;
 }
 
-void applyTextProfile(int aeLevel, int brightness, gainceiling_t gainCeiling) {
+void applyMainCameraProfile() {
   sensor_t* s = esp_camera_sensor_get();
   if (!s) return;
 
@@ -135,24 +173,26 @@ void applyTextProfile(int aeLevel, int brightness, gainceiling_t gainCeiling) {
   s->set_wb_mode(s, 0);
   s->set_exposure_ctrl(s, 1);
   s->set_aec2(s, 1);
-  s->set_ae_level(s, aeLevel);
+  s->set_ae_level(s, 2);
   s->set_gain_ctrl(s, 1);
-  s->set_gainceiling(s, gainCeiling);
-  s->set_brightness(s, brightness);
+  s->set_gainceiling(s, GAINCEILING_2X);
+  s->set_brightness(s, 2);
   s->set_contrast(s, 2);
-  s->set_saturation(s, -1);
+  s->set_saturation(s, 0);
   if (s->set_sharpness) s->set_sharpness(s, -2);
   if (s->set_denoise) s->set_denoise(s, 2);
   if (s->set_bpc) s->set_bpc(s, 1);
   if (s->set_wpc) s->set_wpc(s, 1);
   if (s->set_lenc) s->set_lenc(s, 1);
   if (s->set_raw_gma) s->set_raw_gma(s, 1);
+  if (s->set_vflip) s->set_vflip(s, 1);
+  if (s->set_hmirror) s->set_hmirror(s, 0);
 }
 
 bool initCamera() {
   bool hasPsram = psramFound();
-  activeFrameSize = FRAMESIZE_SVGA;
-  activeJpegQuality = 10;
+  activeFrameSize = hasPsram ? FRAMESIZE_SXGA : FRAMESIZE_XGA;
+  activeJpegQuality = CAM_CAPTURE_JPEG_QUALITY;
 
   Serial.printf("[INFO] psramFound=%d freePsram=%u\n", hasPsram, ESP.getFreePsram());
 
@@ -183,7 +223,9 @@ bool initCamera() {
   config.fb_location = hasPsram ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
   config.grab_mode = CAMERA_GRAB_LATEST;
 
-  Serial.println("[INFO] Camera test uses SVGA/800x600 for faster proof shots");
+  Serial.printf("[INFO] Camera test uses main-system profile frame=%s q=%d\n",
+                hasPsram ? "SXGA/1280x1024" : "XGA/1024x768",
+                CAM_CAPTURE_JPEG_QUALITY);
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
@@ -195,7 +237,7 @@ bool initCamera() {
   sensor_t* s = esp_camera_sensor_get();
   if (s) {
     s->set_framesize(s, activeFrameSize);
-    applyTextProfile(2, 1, GAINCEILING_2X);
+    applyMainCameraProfile();
   }
 
   Serial.println("[OK] Camera initialized");
@@ -227,16 +269,24 @@ void quietCameraPins() {
   }
 }
 
+void coolDownHardware(bool keepWiFi) {
+  sensorStandby();
+  esp_camera_deinit();
+  quietCameraPins();
+  if (!keepWiFi) {
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    btStop();
+  }
+}
+
 void coolDownAndSleep(const String& line1, const String& line2) {
   drawTwoLines(line1, line2);
   Serial.println("[INFO] Cooling down: WiFi off, OLED off, camera pins quiet, deep sleep.");
   delay(5000);
 
   u8g2.setPowerSave(1);
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
-  btStop();
-  quietCameraPins();
+  coolDownHardware(false);
 
   Serial.flush();
   esp_deep_sleep_start();
@@ -268,7 +318,7 @@ bool parseRawHttpResponse(const String& rawResp, int& outStatusCode, String& out
   return true;
 }
 
-bool postUploadBinaryOnce(const uint8_t* jpegData, size_t jpegLen, int& outStatusCode, String& outBody) {
+bool postUploadBinaryOnce(const uint8_t* jpegData, size_t jpegLen, int photoIndex, int& outStatusCode, String& outBody) {
   outStatusCode = -1;
   outBody = "";
 
@@ -283,7 +333,7 @@ bool postUploadBinaryOnce(const uint8_t* jpegData, size_t jpegLen, int& outStatu
 
   String path = String(UPLOAD_PHOTO_PATH) +
                 "?question_id=" + String(QUESTION_ID) +
-                "&index=" + String(PHOTO_INDEX);
+                "&index=" + String(photoIndex);
 
   String req;
   req.reserve(420);
@@ -299,7 +349,7 @@ bool postUploadBinaryOnce(const uint8_t* jpegData, size_t jpegLen, int& outStatu
   req += "\r\nX-Question-Id: ";
   req += String(QUESTION_ID);
   req += "\r\nX-Photo-Index: ";
-  req += String(PHOTO_INDEX);
+  req += String(photoIndex);
   req += "\r\nContent-Length: ";
   req += String(jpegLen);
   req += "\r\n\r\n";
@@ -346,15 +396,15 @@ bool postUploadBinaryOnce(const uint8_t* jpegData, size_t jpegLen, int& outStatu
   return parseRawHttpResponse(rawResp, outStatusCode, outBody);
 }
 
-bool uploadPhotoToServer(const uint8_t* jpegData, size_t jpegLen, String& outPhotoId) {
+bool uploadPhotoToServer(const uint8_t* jpegData, size_t jpegLen, int photoIndex, String& outPhotoId) {
   for (int attempt = 1; attempt <= UPLOAD_RETRY_COUNT; attempt++) {
     if (!ensureWiFiConnected()) return false;
 
     int code = -1;
     String body;
-    Serial.printf("[INFO] upload attempt %d/%d bytes=%u\n",
-                  attempt, UPLOAD_RETRY_COUNT, (unsigned)jpegLen);
-    bool posted = postUploadBinaryOnce(jpegData, jpegLen, code, body);
+    Serial.printf("[INFO] upload attempt %d/%d index=%d bytes=%u\n",
+                  attempt, UPLOAD_RETRY_COUNT, photoIndex, (unsigned)jpegLen);
+    bool posted = postUploadBinaryOnce(jpegData, jpegLen, photoIndex, code, body);
 
     Serial.printf("[INFO] upload posted=%d code=%d\n", posted ? 1 : 0, code);
     if (body.length()) Serial.println(body);
@@ -391,52 +441,72 @@ void freeCapturedJpeg(CapturedJpeg& jpeg) {
   jpeg.height = 0;
 }
 
-bool captureCandidate(const char* label, int aeLevel, int brightness, gainceiling_t gainCeiling, CapturedJpeg& out) {
-  Serial.printf("[INFO] Capture candidate %s ae=%d brightness=%d gainCeiling=%d\n",
-                label, aeLevel, brightness, (int)gainCeiling);
-  drawTwoLines("Capturing", label);
-
-  applyTextProfile(aeLevel, brightness, gainCeiling);
-  delay(600);
-
-  for (int i = 0; i < 4; i++) {
-    camera_fb_t* warmup = esp_camera_fb_get();
-    if (warmup) {
-      Serial.printf("[INFO] Warmup %d bytes=%u\n", i + 1, (unsigned)warmup->len);
-      esp_camera_fb_return(warmup);
-    } else {
-      Serial.printf("[WARN] Warmup %d failed\n", i + 1);
-    }
-    delay(180);
+camera_fb_t* captureFrame(sensor_t* s) {
+  for (int i = 0; i < CAM_CAPTURE_RETRIES; i++) {
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (fb) return fb;
+    Serial.printf("[WARN] Final capture retry %d/%d failed\n", i + 1, CAM_CAPTURE_RETRIES);
+    delay(120);
   }
 
-  camera_fb_t* fb = esp_camera_fb_get();
+  if (s && s->set_framesize) {
+    Serial.println("[INFO] Falling back to XGA q=12 and retrying capture");
+    activeFrameSize = FRAMESIZE_XGA;
+    activeJpegQuality = CAM_FALLBACK_JPEG_QUALITY;
+    s->set_framesize(s, activeFrameSize);
+    if (s->set_quality) s->set_quality(s, activeJpegQuality);
+    delay(700);
+
+    for (int i = 0; i < 2; i++) {
+      camera_fb_t* w = esp_camera_fb_get();
+      if (w) esp_camera_fb_return(w);
+      delay(CAM_WARMUP_DELAY_MS);
+    }
+
+    for (int i = 0; i < CAM_CAPTURE_RETRIES; i++) {
+      camera_fb_t* fb = esp_camera_fb_get();
+      if (fb) return fb;
+      Serial.printf("[WARN] Fallback capture retry %d/%d failed\n", i + 1, CAM_CAPTURE_RETRIES);
+      delay(120);
+    }
+  }
+
+  return nullptr;
+}
+
+bool captureOneMainStyle(CapturedJpeg& out) {
+  Serial.printf("[INFO] Capture main-style frame=%s q=%d brightness=2 contrast=2 saturation=0 ae=2 gc=2x sharp=-2 denoise=2\n",
+                activeFrameSize == FRAMESIZE_SXGA ? "SXGA" : "XGA",
+                CAM_CAPTURE_JPEG_QUALITY);
+  drawTwoLines("Capturing", "main profile");
+
+  delay(CAM_SETTLE_AFTER_INIT_MS);
+  sensor_t* s = esp_camera_sensor_get();
+  if (s && s->set_quality) s->set_quality(s, CAM_WARMUP_JPEG_QUALITY);
+
+  for (int i = 0; i < CAM_WARMUP_FRAMES; i++) {
+    camera_fb_t* warmup = esp_camera_fb_get();
+    if (warmup) {
+      Serial.printf("[INFO] Warmup %d/%d q=%d bytes=%u\n",
+                    i + 1, CAM_WARMUP_FRAMES, CAM_WARMUP_JPEG_QUALITY,
+                    (unsigned)warmup->len);
+      esp_camera_fb_return(warmup);
+    } else {
+      Serial.printf("[WARN] Warmup %d/%d failed\n", i + 1, CAM_WARMUP_FRAMES);
+    }
+    delay(CAM_WARMUP_DELAY_MS);
+  }
+
+  if (s && s->set_quality) {
+    s->set_quality(s, CAM_CAPTURE_JPEG_QUALITY);
+    activeJpegQuality = CAM_CAPTURE_JPEG_QUALITY;
+    delay(500);
+  }
+
+  camera_fb_t* fb = captureFrame(s);
   if (!fb) {
-    Serial.println("[WARN] Final capture failed");
-
-    if (activeFrameSize != FRAMESIZE_SXGA) {
-      Serial.println("[INFO] Falling back to SXGA and retrying capture");
-      activeFrameSize = FRAMESIZE_SXGA;
-      sensor_t* s = esp_camera_sensor_get();
-      if (s) {
-        s->set_framesize(s, activeFrameSize);
-        applyTextProfile(aeLevel, brightness, gainCeiling);
-      }
-      delay(800);
-
-      for (int i = 0; i < 3; i++) {
-        camera_fb_t* retryWarmup = esp_camera_fb_get();
-        if (retryWarmup) esp_camera_fb_return(retryWarmup);
-        delay(180);
-      }
-
-      fb = esp_camera_fb_get();
-    }
-
-    if (!fb) {
-      Serial.println("[ERR] Final capture failed after fallback");
-      return false;
-    }
+    Serial.println("[ERR] Final capture failed after retries");
+    return false;
   }
 
   out.data = (uint8_t*)ps_malloc(fb->len);
@@ -452,32 +522,34 @@ bool captureCandidate(const char* label, int aeLevel, int brightness, gainceilin
   out.width = fb->width;
   out.height = fb->height;
 
-  Serial.printf("[OK] Candidate %s bytes=%u, w=%u h=%u\n",
-                label, (unsigned)fb->len, fb->width, fb->height);
+  Serial.printf("[OK] Captured bytes=%u, w=%u h=%u\n",
+                (unsigned)fb->len, fb->width, fb->height);
 
   esp_camera_fb_return(fb);
   return true;
 }
 
-void runOneShotFlow() {
-  drawTwoLines("Wait 10 sec...", "Prepare target");
-  Serial.println("[INFO] Waiting 10s before single capture...");
-  delay(START_CAPTURE_DELAY_MS);
+void runButtonCaptureFlow() {
+  if (captureBusy) return;
+  captureBusy = true;
+  int photoIndex = nextPhotoIndex;
+
+  Serial.printf("[INFO] Button capture start index=%d with main-system camera profile.\n", photoIndex);
 
   drawTwoLines("Camera init", "Power active");
   if (!initCamera()) {
-    esp_camera_deinit();
-    coolDownAndSleep("Camera failed", "Sleeping");
+    coolDownHardware(true);
+    drawTwoLines("Camera failed", "CAM retry");
+    captureBusy = false;
     return;
   }
 
-  delay(SENSOR_SETTLE_MS);
-
   CapturedJpeg best;
 
-  if (!captureCandidate("clean SVGA", 2, 1, GAINCEILING_2X, best)) {
-    esp_camera_deinit();
-    coolDownAndSleep("Capture failed", "No frame buffer");
+  if (!captureOneMainStyle(best)) {
+    coolDownHardware(true);
+    drawTwoLines("Capture failed", "CAM retry");
+    captureBusy = false;
     return;
   }
 
@@ -492,24 +564,30 @@ void runOneShotFlow() {
 
   String photoId;
   drawTwoLines("Uploading...", "upload-photo");
-  bool uploadOk = uploadPhotoToServer(best.data, best.len, photoId);
+  bool uploadOk = uploadPhotoToServer(best.data, best.len, photoIndex, photoId);
   freeCapturedJpeg(best);
 
   if (!uploadOk) {
-    coolDownAndSleep("Upload FAIL", "Check API/auth");
+    drawTwoLines("Upload FAIL", "CAM retry");
+    captureBusy = false;
     return;
   }
 
+  nextPhotoIndex++;
   String line2 = "photo_id:" + photoId;
   if (line2.length() > 21) line2 = line2.substring(0, 21);
-  coolDownAndSleep("Upload OK", line2);
+  drawTwoLines("Upload OK", line2);
+  delay(1500);
+  drawTwoLines("CAM=shot", "idx=" + String(nextPhotoIndex));
+  captureBusy = false;
 }
 
 void setup() {
   Serial.begin(115200);
   delay(600);
   Serial.println();
-  Serial.println("=== Casio Camera OneShot Test ===");
+  Serial.println("=== Casio Camera Button Upload Test ===");
+  btnCamera.begin(BTN_CAMERA);
 
   Wire.begin(OLED_SDA, OLED_SCL);
   Wire.setClock(400000);
@@ -518,16 +596,21 @@ void setup() {
   u8g2.setContrast(25);
   u8g2.enableUTF8Print();
 
-  drawTwoLines("OneShot Camera", "Init...");
+  drawTwoLines("Camera Button", "Init...");
 
   if (!connectWiFi()) {
     coolDownAndSleep("WiFi failed", "Sleeping");
     return;
   }
 
-  runOneShotFlow();
+  drawTwoLines("CAM=shot", "idx=0");
+  Serial.println("[INFO] Ready. Press CAMERA button on GPIO38 to capture and upload one photo.");
 }
 
 void loop() {
-  delay(1000);
+  if (btnCamera.fell()) {
+    Serial.println("[BTN] CAMERA");
+    runButtonCaptureFlow();
+  }
+  delay(20);
 }
