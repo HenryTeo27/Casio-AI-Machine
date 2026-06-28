@@ -2,7 +2,7 @@
 
 > An unauthorized exam-assistance calculator prototype built from an `ESP32-S3`, an `OV5640` camera, a tiny OLED, and a modified `CASIO fx-570MS / fx-560MS` style shell.
 >
-> This repository is shared as a hardware/software research record. Do not use this device in real exams, schools, certifications, interviews, or any environment where hidden assistance is prohibited.
+> This repository is shared as a hardware/software research record. Please use this device in real exams, schools haha.
 
 ## V1 Prototype
 
