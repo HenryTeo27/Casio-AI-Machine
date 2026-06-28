@@ -1,79 +1,36 @@
-# Casio AI Machine Server Backend Copy
-This folder is a copy-paste backend reference, not a standalone runnable server.
-Create your own Next.js TypeScript backend, then copy the relevant API routes, utils, Prisma models, and migrations into it.
+﻿# Casio AI Backend Reference
 
-This folder is a direct reference copy of the Casio AI Machine backend pieces from:
+This folder is a copied reference of the Casio AI backend pieces from the EstateBoostCopilot web/server project. It is included so the firmware repository contains enough backend context for open-source readers to understand and rebuild the device pipeline.
 
-`EstateBoostCopilot/general` (source project path)
+The source project was not modified while creating this copy.
 
-It is intended for open-source migration/reference. Sensitive values, URLs, project-specific aliases, and deployment settings should be reviewed before use.
+## Included Files
 
-## Copied Backend API
+- `app/api/casio-ai/` - legacy upload/solve routes and the newer V2 session/question routes.
+- `app/utils/casioAi.ts` - AI solve and OLED-layout orchestration.
+- `app/utils/casioDisplay.ts` - server-side text/formula rendering into `1-bit_xbm` OLED bitmap blocks.
+- `app/utils/casioFontconfig.ts` and `app/utils/fonts/` - font setup used by the bitmap renderer.
+- `utils/prisma.ts` - Prisma client helper used by the routes.
+- `prisma/schema.prisma` - copied schema for reference.
+- `prisma/migrations/20260514093000_ebc_add_casio_ai_tables/` - initial Casio AI tables.
+- `prisma/migrations/20260519100000_ebc_add_casio_display_blocks/` - display block storage.
+- `prisma/migrations/20260624090000_casio_ai_v2_session/` - V2 session/question pipeline.
+- `prisma/migrations/20260625093000_casio_ai_question_create_token/` - idempotent question creation token.
 
-- `app/api/casio-ai/upload-photo/route.ts`
-  - Uploads JPEG photos from ESP32.
-  - Stores photo metadata in Prisma.
-  - Stores image bytes in Vercel Blob.
-- `app/api/casio-ai/solve/route.ts`
-  - Starts/continues solve workflow.
-  - Loads uploaded photos.
-  - Calls OpenAI solve prompt.
-  - Saves answer/status/usage in DB.
-- `app/api/casio-ai/question/route.ts`
-  - Fetches question status/result.
-  - Can continue OLED render workflow when answer exists but display blocks are not ready.
-- `app/api/casio-ai/question-block/route.ts`
-  - Fetches one display block at a time for ESP32 incremental loading.
+## What The Backend Does
 
-## Copied Utilities
+1. Starts/resumes a device session.
+2. Creates question records.
+3. Accepts one or more uploaded photos per question.
+4. Stores photo metadata and blob URLs.
+5. Runs AI solving against the uploaded photos.
+6. Runs answer-layout formatting for tiny OLED screens.
+7. Renders Chinese/math/text blocks into `1-bit` bitmap payloads.
+8. Lets the ESP32 poll status and fetch answer blocks incrementally.
 
-- `app/utils/casioAi.ts`
-  - Casio device auth.
-  - OpenAI solve/layout calls.
-  - Retry/fallback logic.
-  - Usage/status normalization.
-- `app/utils/casioDisplay.ts`
-  - OLED bitmap rendering helpers.
-  - Text/formula layout rendering helpers.
-  - 1-bit XBM/base64 conversion.
-- `app/utils/casioFontconfig.ts`
-  - Fontconfig setup for serverless rendering.
-- `app/utils/fonts/`
-  - Font files used by the renderer.
-- `utils/prisma.ts`
-  - Prisma client setup used by the copied routes.
+## Important Notes
 
-## Copied DB Parts
-
-- `prisma/casio-models.prisma`
-  - Casio-only Prisma model excerpt.
-- `prisma/migrations/20260514093000_ebc_add_casio_ai_tables/migration.sql`
-  - Creates `CasioAiQuestion` and `CasioAiPhoto`.
-- `prisma/migrations/20260519100000_ebc_add_casio_display_blocks/migration.sql`
-  - Adds display-block related DB fields.
-
-## Required Runtime Dependencies
-
-The copied backend expects a Next.js/Node server environment with at least:
-
-- `@prisma/client`
-- `@prisma/adapter-pg`
-- `@vercel/blob`
-- `mathjax-full`
-- `sharp`
-- `prisma`
-
-## Required Environment Variables
-
-Review and replace these before deployment:
-
-- `POSTGRES_URL`
-- `BLOB_READ_WRITE_TOKEN`
-- `OPENAI_API_KEY`
-- `CASIO_AI_DEVICE_ID`
-- `CASIO_AI_DEVICE_API_KEY`
-- `CASIO_AI_OPENAI_SOLVE_PROMPT_ID`
-- `CASIO_AI_OPENAI_SOLVE_PROMPT_VERSION`
-- `CASIO_AI_OPENAI_LAYOUT_PROMPT_ID`
-- `CASIO_AI_OPENAI_LAYOUT_PROMPT_VERSION`
-- Optional rendering/model tuning env vars referenced in `app/utils/casioAi.ts` and `app/utils/casioDisplay.ts`.
+- This is a reference copy, not a standalone Next.js app.
+- You still need the parent web app dependencies, environment variables, database, blob storage, and OpenAI configuration to run it.
+- Do not commit real `.env` secrets.
+- If the production backend changes, re-copy the Casio-specific route/util/prisma files into this folder.

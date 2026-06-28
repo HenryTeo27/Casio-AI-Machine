@@ -6,11 +6,13 @@ import {
     safeText,
     solveCasioAnswerWithOpenAi
 } from "@/app/utils/casioAi";
+import { randomUUID } from "crypto";
 import { after, NextRequest, NextResponse } from "next/server";
 
 export const maxDuration = 300;
 
 const LOG_PREFIX = "[CASIO_AI_SOLVE]";
+const SOLVE_JOB_PREFIX = "casio_solve_job:";
 
 type SolveBody = {
     device_id?: unknown;
@@ -33,6 +35,7 @@ async function runAnswerJob(args: {
     questionId: string;
     deviceId: string;
     questionNo: number;
+    jobToken: string;
     mode: string;
     imageUrls: string[];
     contextTail: string;
@@ -44,8 +47,12 @@ async function runAnswerJob(args: {
             contextTail: args.contextTail
         });
 
-        await prisma.casioAiQuestion.update({
-            where: { id: args.questionId },
+        const updated = await prisma.casioAiQuestion.updateMany({
+            where: {
+                id: args.questionId,
+                status: "PROCESSING",
+                modelHint: args.jobToken
+            },
             data: {
                 mode: args.mode,
                 modelHint: answerResult.model,
@@ -61,6 +68,15 @@ async function runAnswerJob(args: {
                 completedAt: null
             }
         });
+
+        if (updated.count === 0) {
+            console.warn(`${LOG_PREFIX} answer_job_stale_ignored`, {
+                totalMs: Date.now() - startedAt,
+                deviceId: args.deviceId,
+                questionNo: args.questionNo
+            });
+            return;
+        }
 
         console.log(`${LOG_PREFIX} answer_job_done`, {
             totalMs: Date.now() - startedAt,
@@ -82,14 +98,26 @@ async function runAnswerJob(args: {
             message
         });
 
-        await prisma.casioAiQuestion.update({
-            where: { id: args.questionId },
+        const updated = await prisma.casioAiQuestion.updateMany({
+            where: {
+                id: args.questionId,
+                status: "PROCESSING",
+                modelHint: args.jobToken
+            },
             data: {
                 status: "FAILED",
                 errorMessage: message,
                 completedAt: new Date()
             }
         });
+        if (updated.count === 0) {
+            console.warn(`${LOG_PREFIX} answer_job_failed_stale_ignored`, {
+                totalMs: Date.now() - startedAt,
+                deviceId: args.deviceId,
+                questionNo: args.questionNo,
+                message
+            });
+        }
     }
 }
 
@@ -97,6 +125,8 @@ export async function POST(request: NextRequest) {
     const startedAt = Date.now();
     let questionNoForError: number | null = null;
     let deviceIdForError = "";
+    let questionIdForError = "";
+    let jobTokenForError = "";
 
     try {
         const auth = authenticateCasioRequest(request);
@@ -134,6 +164,7 @@ export async function POST(request: NextRequest) {
         }
 
         const mode = safeText(body?.mode) || "gpt-test";
+        const jobToken = `${SOLVE_JOB_PREFIX}${randomUUID()}`;
         console.log(`${LOG_PREFIX} start`, {
             deviceId: auth.deviceId,
             questionNo,
@@ -154,21 +185,29 @@ export async function POST(request: NextRequest) {
                 deviceId: auth.deviceId,
                 questionNo,
                 mode,
-                modelHint: "openai_prompt_solve",
+                modelHint: jobToken,
                 photoCount: photoIds.length,
                 status: "PROCESSING",
                 contextTail: safeText(body?.context_tail)
             },
             update: {
                 mode,
-                modelHint: "openai_prompt_solve",
+                modelHint: jobToken,
                 photoCount: photoIds.length,
                 status: "PROCESSING",
                 contextTail: safeText(body?.context_tail),
+                answer: null,
+                displayText: null,
+                displayBlocks: [],
+                promptTokens: null,
+                completionTokens: null,
+                totalTokens: null,
                 errorMessage: null,
                 completedAt: null
             }
         });
+        questionIdForError = question.id;
+        jobTokenForError = jobToken;
         console.log(`${LOG_PREFIX} db_upsert_ms`, Date.now() - dbUpsertStartedAt);
 
         const photoLoadStartedAt = Date.now();
@@ -190,6 +229,18 @@ export async function POST(request: NextRequest) {
         });
 
         if (photos.length !== photoIds.length) {
+            await prisma.casioAiQuestion.updateMany({
+                where: {
+                    id: question.id,
+                    status: "PROCESSING",
+                    modelHint: jobToken
+                },
+                data: {
+                    status: "FAILED",
+                    errorMessage: "photo_ids_not_found",
+                    completedAt: new Date()
+                }
+            });
             return NextResponse.json(
                 { ok: false, error: "photo_ids_not_found" },
                 { status: 400 }
@@ -206,6 +257,7 @@ export async function POST(request: NextRequest) {
                 questionId: question.id,
                 deviceId: auth.deviceId,
                 questionNo,
+                jobToken,
                 mode,
                 imageUrls: orderedUrls,
                 contextTail: safeText(body?.context_tail)
@@ -247,14 +299,13 @@ export async function POST(request: NextRequest) {
             message
         });
 
-        if (deviceIdForError && questionNoForError !== null && questionNoForError >= 0) {
+        if (questionIdForError && jobTokenForError) {
             try {
-                await prisma.casioAiQuestion.update({
+                await prisma.casioAiQuestion.updateMany({
                     where: {
-                        deviceId_questionNo: {
-                            deviceId: deviceIdForError,
-                            questionNo: questionNoForError
-                        }
+                        id: questionIdForError,
+                        status: "PROCESSING",
+                        modelHint: jobTokenForError
                     },
                     data: {
                         status: "FAILED",

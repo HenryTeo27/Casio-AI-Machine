@@ -8,13 +8,15 @@ import {
 } from "@/app/utils/casioDisplay";
 import { NextRequest } from "next/server";
 
-const FALLBACK_DEVICE_ID = // CASIO_AI_MACHINE_001 from .env;
-const FALLBACK_DEVICE_API_KEY = // DEVICE_API_KEY from .env;
+const FALLBACK_DEVICE_ID = "CASIO_AI_MACHINE_001";
+const FALLBACK_DEVICE_API_KEY = "21326a10-c7f8-4ca9-8e7c-d6f55c15d564";
 const LOG_PREFIX = "[CASIO_AI]";
-const DEFAULT_SOLVE_PROMPT_ID = // open ai api platform chat 开第一轮ai解题api ;
-const DEFAULT_SOLVE_PROMPT_VERSION = // open ai api platform chat 开第一轮ai version;
-const DEFAULT_LAYOUT_PROMPT_ID = // open ai api platform chat 开第2轮ai把第一轮解的题拿去切block api;
-const DEFAULT_LAYOUT_PROMPT_VERSION = // open ai api platform chat 开第2轮ai把第一轮解的题拿去切block version;
+const DEFAULT_SOLVE_PROMPT_ID =
+    "pmpt_6a106f668b9c8190a9ffaac9fc0b7198025cea817cae6af5";
+const DEFAULT_SOLVE_PROMPT_VERSION = "15";
+const DEFAULT_LAYOUT_PROMPT_ID =
+    "pmpt_6a10657544288194bd83399ed179c8ce0ff0947071024441";
+const DEFAULT_LAYOUT_PROMPT_VERSION = "12";
 
 const DISPLAY_LINE_UNITS = 40; // About 20 CJK chars or 40 narrow chars.
 const MAX_CONTEXT_TAIL_CHARS = 3000;
@@ -460,11 +462,6 @@ function openAiErrorMessage(payload: JsonObject): string {
     );
 }
 
-function isUnknownPromptVariableError(payload: JsonObject): boolean {
-    const message = openAiErrorMessage(payload).toLowerCase();
-    return message.includes("unknown prompt variables");
-}
-
 function resolvePromptConfig(kind: "solve" | "layout"): {
     id: string;
     version: string;
@@ -558,7 +555,10 @@ async function callOpenAiChatCompletions(args: {
     maxOutputTokens?: number;
 }): Promise<OpenAiCallResult> {
     const contentBlocks: JsonObject[] = [
-        { type: "text", text: buildUserPrompt(args.contextTail, args.promptMode) }
+        {
+            type: "text",
+            text: buildUserPrompt(args.contextTail, args.promptMode)
+        }
     ];
 
     for (const imageUrl of args.imageUrls) {
@@ -683,7 +683,8 @@ function shouldRetryEmptyModelOutput(
     if (safeText(contentText)) return false;
 
     const status = safeText(call.payload.status).toLowerCase();
-    const incompleteDetails = (call.payload.incomplete_details || {}) as JsonObject;
+    const incompleteDetails = (call.payload.incomplete_details ||
+        {}) as JsonObject;
     const incompleteReason = safeText(incompleteDetails.reason).toLowerCase();
     const usage = normalizeUsage(call.payload.usage);
 
@@ -727,7 +728,10 @@ async function callOpenAiResponses(args: {
     maxOutputTokens?: number;
 }): Promise<OpenAiCallResult> {
     const userContent: JsonObject[] = [
-        { type: "input_text", text: buildUserPrompt(args.contextTail, args.promptMode) }
+        {
+            type: "input_text",
+            text: buildUserPrompt(args.contextTail, args.promptMode)
+        }
     ];
 
     for (const imageUrl of args.imageUrls) {
@@ -873,14 +877,19 @@ function validateAiBitmapBlocks(rawBlocks: unknown): CasioDisplayBlock[] {
                 decodedLength = -1;
             }
 
+            const expectedBytes =
+                width > 0 && (height === 16 || height === 32 || height === 64)
+                    ? Math.ceil(width / 8) * height
+                    : -1;
+
             if (
                 type === "bitmap" &&
-                width === OLED_BITMAP_WIDTH &&
-                height === OLED_BITMAP_HEIGHT &&
+                width > 0 &&
+                (height === 16 || height === 32 || height === 64) &&
                 format === "1bit_xbm" &&
                 data &&
                 /^[A-Za-z0-9+/]+={0,2}$/.test(data) &&
-                decodedLength === OLED_BITMAP_BYTES
+                decodedLength === expectedBytes
             ) {
                 output.push({
                     type: "bitmap",
@@ -937,7 +946,9 @@ function countSetBits(byte: number): number {
     return count;
 }
 
-function normalizeOledPolarity(blocks: CasioDisplayBlock[]): CasioDisplayBlock[] {
+function normalizeOledPolarity(
+    blocks: CasioDisplayBlock[]
+): CasioDisplayBlock[] {
     return blocks.map((block) => {
         const decoded = Buffer.from(block.data, "base64");
         const onBits = decoded.reduce(
@@ -1000,7 +1011,11 @@ async function generateOledBitmapsWithOpenAi(args: {
     ];
     let lastError: unknown = null;
 
-    for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
+    for (
+        let attemptIndex = 0;
+        attemptIndex < attempts.length;
+        attemptIndex += 1
+    ) {
         const attempt = attempts[attemptIndex];
         try {
             const call = await callOpenAiTextResponses({
@@ -1050,7 +1065,8 @@ async function generateOledBitmapsWithOpenAi(args: {
                 attempt: attemptIndex + 1,
                 blocks: displayBlocks.length,
                 bytes: displayBlocks.reduce(
-                    (total, block) => total + Buffer.byteLength(block.data, "base64"),
+                    (total, block) =>
+                        total + Buffer.byteLength(block.data, "base64"),
                     0
                 ),
                 rawChars: contentText.length,
@@ -1058,7 +1074,9 @@ async function generateOledBitmapsWithOpenAi(args: {
             });
 
             if (!displayBlocks.length) {
-                displayBlocks = await buildDisplayBlocksFromOledPages(parsed?.oled_pages);
+                displayBlocks = await buildDisplayBlocksFromOledPages(
+                    parsed?.oled_pages
+                );
             }
 
             if (!displayBlocks.length && displayText !== args.answer) {
@@ -1139,11 +1157,13 @@ export async function solveCasioAnswerWithOpenAi(args: {
     const userContent: JsonObject[] = [
         {
             type: "input_text",
-            text:
-                "Please solve the attached question photos according to the configured prompt. Use the photos as the source of truth."
+            text: "Please solve the attached question photos according to the configured prompt. Use the photos as the source of truth."
         }
     ];
-    const contextTail = safeText(args.contextTail).slice(0, MAX_CONTEXT_TAIL_CHARS);
+    const contextTail = safeText(args.contextTail).slice(
+        0,
+        MAX_CONTEXT_TAIL_CHARS
+    );
     if (contextTail) {
         userContent.push({
             type: "input_text",
@@ -1202,7 +1222,9 @@ export async function solveCasioAnswerWithOpenAi(args: {
             : null;
     const parsed = parseJsonFromModelText(contentText) || outputParsed;
     if (!safeText(contentText) && !parsed) {
-        const err = new Error("openai_empty_output") as Error & { status?: number };
+        const err = new Error("openai_empty_output") as Error & {
+            status?: number;
+        };
         err.status = 502;
         throw err;
     }
@@ -1259,14 +1281,17 @@ export async function renderCasioAnswerForOledWithOpenAi(args: {
 
     const attempts: Array<{
         timeoutMs: number;
-        mode: "variables" | "input";
+        mode: "input";
     }> = [
-        { timeoutMs: 210000, mode: "variables" },
         { timeoutMs: 210000, mode: "input" },
         { timeoutMs: 70000, mode: "input" }
     ];
 
-    for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
+    for (
+        let attemptIndex = 0;
+        attemptIndex < attempts.length;
+        attemptIndex += 1
+    ) {
         const attempt = attempts[attemptIndex];
         try {
             const layoutStartedAt = Date.now();
@@ -1283,26 +1308,17 @@ export async function renderCasioAnswerForOledWithOpenAi(args: {
                 apiKey,
                 promptId: layoutPrompt.id,
                 promptVersion: layoutPrompt.version,
-                variables:
-                    attempt.mode === "variables"
-                        ? {
-                              answer_full: args.answer
-                          }
-                        : undefined,
-                input:
-                    attempt.mode === "input"
-                        ? [
-                              {
-                                  role: "user",
-                                  content: [
-                                      {
-                                          type: "input_text",
-                                          text: `answer_full:\n${args.answer}`
-                                      }
-                                  ]
-                              }
-                          ]
-                        : undefined,
+                input: [
+                    {
+                        role: "user",
+                        content: [
+                            {
+                                type: "input_text",
+                                text: `answer_full:\n${args.answer}`
+                            }
+                        ]
+                    }
+                ],
                 timeoutMs: attempt.timeoutMs
             });
 
@@ -1316,18 +1332,15 @@ export async function renderCasioAnswerForOledWithOpenAi(args: {
 
             if (call.status < 200 || call.status >= 300) {
                 const message = openAiErrorMessage(call.payload);
-                console.warn(`${LOG_PREFIX} openai_prompt_layout_status_retry`, {
-                    attempt: attemptIndex + 1,
-                    status: call.status,
-                    mode: attempt.mode,
-                    message: message || "layout_prompt_failed"
-                });
-                if (
-                    attempt.mode === "variables" &&
-                    !isUnknownPromptVariableError(call.payload)
-                ) {
-                    break;
-                }
+                console.warn(
+                    `${LOG_PREFIX} openai_prompt_layout_status_retry`,
+                    {
+                        attempt: attemptIndex + 1,
+                        status: call.status,
+                        mode: attempt.mode,
+                        message: message || "layout_prompt_failed"
+                    }
+                );
                 continue;
             }
 
@@ -1393,7 +1406,6 @@ export async function renderCasioAnswerForOledWithOpenAi(args: {
     if (!displayBlocks.length) {
         const renderStartedAt = Date.now();
         displayBlocks = await buildDisplayBlocksFromModel({
-            blocks: args.rawBlocks,
             answer: args.answer
         });
         console.warn(`${LOG_PREFIX} render_done`, {
@@ -1402,12 +1414,14 @@ export async function renderCasioAnswerForOledWithOpenAi(args: {
             displayBlocks: displayBlocks.length,
             answerChars: args.answer.length,
             hasModelBlocks: Array.isArray(args.rawBlocks),
-            source: "server_emergency_fallback"
+            source: "server_answer_fallback"
         });
     }
 
     if (!displayBlocks.length) {
-        const err = new Error("oled_display_blocks_empty_after_fallback") as Error & {
+        const err = new Error(
+            "oled_display_blocks_empty_after_fallback"
+        ) as Error & {
             status?: number;
         };
         err.status = 502;

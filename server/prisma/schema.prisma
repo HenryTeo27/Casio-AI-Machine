@@ -1,0 +1,1238 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+    provider        = "prisma-client-js"
+    previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("POSTGRES_URL")
+}
+
+model UserAcc {
+    id              String           @id @default(uuid())
+    email           String           @unique
+    oauth           Oauth?
+    password        String?
+    passwordLength  Int              @default(0)
+    user            User?
+    createdAt       DateTime         @default(now())
+    updatedAt       DateTime         @updatedAt
+    BlastUser       BlastUser?
+    PropCopilotUser PropCopilotUser?
+}
+
+model User {
+    id          String    @id @default(uuid())
+    userAcc     UserAcc   @relation(fields: [userAccId], references: [id])
+    userAccId   String    @unique
+    profile     Profile?
+    createdAt   DateTime  @default(now())
+    updatedAt   DateTime  @updatedAt
+    latestLogin DateTime?
+    expiryDate  DateTime?
+
+    AdTable          AdTable[]
+    TeamMember       TeamMember[]
+    TableShare       TableShare[]
+    TableShareMember TableShareMember[]
+    RowShare         RowShare[]
+    RowShareMember   RowShareMember[]
+
+    // LHDN related
+    lhdnCount Int? @default(0)
+
+    // Chat related
+    // joinedChatGroups ChatGroup[]
+
+    totalBalance                   Float?                  @default(0)
+    // Message                 Message[]
+    // conversationParticipant ConversationParticipant[]
+    lhdnStamping                   LhdnStamping[]
+    hasAcceptedTerms               Boolean                 @default(false)
+    lhdnAutoFillPhone              Boolean                 @default(false)
+    communityPosts                 CommunityPost[]
+    communityComments              CommunityComment[]
+    communityPostViews             CommunityPostView[]
+    communityVotes                 CommunityVote[]
+    communityPollVotes             CommunityPollVote[]
+    communityReports               CommunityReport[]
+    communityNotificationsReceived CommunityNotification[] @relation("CommunityNotificationRecipient")
+    communityNotificationsActed    CommunityNotification[] @relation("CommunityNotificationActor")
+    supportConversations           SupportConversation[]
+}
+
+enum Gender {
+    MALE
+    FEMALE
+    RATHER_NOT_SAY
+}
+
+enum Position {
+    PROPERTY_AGENT
+}
+
+enum Theme {
+    LIGHT
+    DARK
+    SYSTEM
+}
+
+model Profile {
+    id     String @id @default(uuid())
+    user   User   @relation(fields: [userId], references: [id])
+    userId String @unique
+
+    // Profile
+    firstName      String?
+    lastName       String?
+    country        String?
+    gender         Gender   @default(RATHER_NOT_SAY)
+    age            Int?
+    phone          String?
+    profilePicture String?
+    position       Position @default(PROPERTY_AGENT)
+
+    // Reserved for future community identity labels such as VIP/Admin/CEO.
+    communityBadgeLabel String?
+    communityBadgeIcon  String?
+    communityBadgeColor String?
+
+    // Notification
+    pushNotification     Boolean @default(true)
+    emailNotification    Boolean @default(true)
+    whatsappNotification Boolean @default(true)
+
+    // Settings
+    darkMode Theme @default(SYSTEM)
+}
+
+enum Oauth {
+    GOOGLE
+    FACEBOOK
+}
+
+enum LhdnStatus {
+    UPLOADING
+    UPLOAD_SUCCEED
+    UPLOAD_FAILED
+    PYTHON_PROCESSING
+    PYTHON_PROCEEDED
+    PYTHON_REJECTED
+    SUBMITING
+    SUBMIT_SUCCEED
+    SUBMIT_FAILED
+    REQUESTING_PAYMENT
+    PAY_SUCCEED
+    PAY_FAILED
+    APPLYING
+    APPLY_SUCCEED
+    APPLY_FAILED
+    LHDN_PAYING
+    LHDN_PAY_SUCCEED
+    LHDN_PAY_FAILED
+    CALCULATION_DANGER
+    CALCULATION_DANGER_REQUESTING_PAYMENT
+    CALCULATION_DANGER_EMAIL_SENT
+    CALCULATION_DANGER_PAY_SUCCEED
+    CALCULATION_DANGER_PAY_FAILED
+    SIJIL_DOWNLOADING
+    SIJIL_DOWNLOAD_SUCCEED
+    SIJIL_DOWNLOAD_FAILED
+    SENDING_TO_CUSTOMER
+    SENT_CUSTOMER
+    SENT_FAILED
+    NA
+}
+
+enum SupportConversationStatus {
+    AI_ACTIVE
+    HUMAN_REQUESTED
+    HUMAN_ACTIVE
+    WAITING_USER
+    RESOLVED
+    CLOSED
+}
+
+enum SupportSenderType {
+    USER
+    AI
+    ADMIN
+    SYSTEM
+}
+
+enum SupportTicketStatus {
+    OPEN
+    IN_PROGRESS
+    RESOLVED
+    CLOSED
+}
+
+enum SupportPriority {
+    LOW
+    NORMAL
+    HIGH
+    URGENT
+}
+
+enum SupportAttachmentType {
+    IMAGE
+}
+
+enum SupportToolCallStatus {
+    PENDING
+    SUCCESS
+    FAILED
+    SKIPPED
+}
+
+model LhdnStamping {
+    id                String     @id @unique @default(uuid())
+    lhdnId            String?
+    user              User       @relation(fields: [userId], references: [id])
+    userId            String
+    pdfUrl            String?
+    lhdnScreenshotUrl String?
+    lhdnStatementUrl  String?
+    lhdnInvoiceUrl    String?
+    json              Json       @default("{}") // Store the JSON data from LHDN
+    pdfUrlHash        String?    @unique
+    sijilUrl          String?
+    name              String?
+    status            LhdnStatus
+    date              DateTime?
+    fee               Float?
+    stampingFee       Float?
+    feeDanger         Float?
+    dangerPayUrl      String?
+    billplzInvoiceUrl String?
+    editedValues      Json       @default("{}") // Store edited values for the stamping
+    createdAt         DateTime   @default(now())
+    updatedAt         DateTime   @updatedAt
+}
+
+model SupportConversation {
+    id                   String                    @id @default(uuid())
+    publicId             String                    @unique
+    user                 User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+    userId               String
+    status               SupportConversationStatus @default(AI_ACTIVE)
+    priority             SupportPriority           @default(NORMAL)
+    subject              String?
+    productHint          String?
+    openAiConversationId String?
+    openAiLastResponseId String?
+    humanRequestedAt     DateTime?
+    humanNotifiedAt      DateTime?
+    humanAssignedEmail   String?
+    closedAt             DateTime?
+    resolvedAt           DateTime?
+    deletedAt            DateTime?
+    lastUserMessageAt    DateTime?
+    lastAdminMessageAt   DateTime?
+    lastAiMessageAt      DateTime?
+    lastActivityAt       DateTime                  @default(now())
+    createdAt            DateTime                  @default(now())
+    updatedAt            DateTime                  @updatedAt
+    messages             SupportMessage[]
+    attachments          SupportAttachment[]
+    tickets              SupportTicket[]
+    toolCalls            SupportToolCall[]
+    adminNotes           SupportAdminNote[]
+    auditLogs            SupportAuditLog[]
+
+    @@index([userId, status, lastActivityAt])
+    @@index([status, lastActivityAt])
+    @@index([humanAssignedEmail, status])
+}
+
+model SupportMessage {
+    id               String              @id @default(uuid())
+    conversation     SupportConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+    conversationId   String
+    senderType       SupportSenderType
+    senderUserId     String?
+    adminEmail       String?
+    body             String?             @db.Text
+    metadata         Json                @default("{}")
+    openAiResponseId String?
+    createdAt        DateTime            @default(now())
+    attachments      SupportAttachment[]
+
+    @@index([conversationId, createdAt])
+}
+
+model SupportAttachment {
+    id             String                @id @default(uuid())
+    conversation   SupportConversation   @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+    conversationId String
+    message        SupportMessage?       @relation(fields: [messageId], references: [id], onDelete: SetNull)
+    messageId      String?
+    type           SupportAttachmentType @default(IMAGE)
+    blobUrl        String                @db.Text
+    blobPath       String?
+    contentType    String
+    originalName   String?
+    sizeBytes      Int?
+    width          Int?
+    height         Int?
+    createdAt      DateTime              @default(now())
+
+    @@index([conversationId])
+    @@index([messageId])
+}
+
+model SupportTicket {
+    id             String              @id @default(uuid())
+    conversation   SupportConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+    conversationId String
+    status         SupportTicketStatus @default(OPEN)
+    reason         String?             @db.Text
+    assignedEmail  String?
+    createdAt      DateTime            @default(now())
+    updatedAt      DateTime            @updatedAt
+    resolvedAt     DateTime?
+    closedAt       DateTime?
+
+    @@index([status, createdAt])
+    @@index([assignedEmail, status])
+}
+
+model SupportToolCall {
+    id             String                @id @default(uuid())
+    conversation   SupportConversation   @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+    conversationId String
+    messageId      String?
+    toolName       String
+    status         SupportToolCallStatus @default(PENDING)
+    input          Json                  @default("{}")
+    output         Json                  @default("{}")
+    error          String?               @db.Text
+    openAiCallId   String?
+    createdAt      DateTime              @default(now())
+    completedAt    DateTime?
+
+    @@index([conversationId, createdAt])
+    @@index([toolName, status])
+}
+
+model SupportAdminNote {
+    id             String              @id @default(uuid())
+    conversation   SupportConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+    conversationId String
+    adminEmail     String
+    body           String              @db.Text
+    createdAt      DateTime            @default(now())
+
+    @@index([conversationId, createdAt])
+}
+
+model SupportAuditLog {
+    id             String               @id @default(uuid())
+    conversation   SupportConversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+    conversationId String?
+    adminEmail     String?
+    userId         String?
+    action         String
+    metadata       Json                 @default("{}")
+    createdAt      DateTime             @default(now())
+
+    @@index([conversationId, createdAt])
+    @@index([action, createdAt])
+}
+
+model Survey {
+    id                  Int               @id @default(autoincrement())
+    title               String?
+    description         String?           @db.Text
+    schema              Json
+    schemaVersion       Int               @default(2)
+    isActive            Boolean           @default(true)
+    requiredToComplete  Boolean           @default(false)
+    allowDismiss        Boolean           @default(true)
+    stoppedAt           DateTime?
+    createdByAdminEmail String?
+    createdAt           DateTime          @default(now())
+    updatedAt           DateTime          @updatedAt
+    SurveyResponse      SurveyResponse[]
+    SurveyDismissal     SurveyDismissal[]
+
+    @@index([isActive, createdAt])
+}
+
+model SurveyResponse {
+    id        Int      @id @default(autoincrement())
+    surveyId  Int
+    userId    String
+    answers   Json
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    Survey Survey @relation(fields: [surveyId], references: [id])
+
+    @@index([surveyId])
+    @@index([userId])
+}
+
+model SurveyDismissal {
+    id          Int      @id @default(autoincrement())
+    surveyId    Int
+    userId      String
+    dismissedAt DateTime @default(now())
+
+    Survey Survey @relation(fields: [surveyId], references: [id])
+
+    @@unique([surveyId, userId])
+    @@index([userId])
+}
+
+model FAQ {
+    id        Int      @id @default(autoincrement())
+    type      String
+    question  String   @db.Text
+    answer    String   @db.Text
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+}
+
+model BlastUser {
+    id        String  @id @default(uuid())
+    userAccId String  @unique
+    userAcc   UserAcc @relation(fields: [userAccId], references: [id])
+    apiKey    String  @unique @default(uuid())
+
+    tier        BlastTier @default(FREE)
+    quota       Int       @default(50)
+    quotaExpiry DateTime?
+
+    referralCode  String? @unique @default(cuid()) // 邀请码
+    referredBy    String? // 被谁邀请（referralCode）
+    referralCount Int     @default(0) // 邀请了多少人
+
+    usageLogs BlastUsageLog[]
+    orders    BlastOrder[]
+    createdAt DateTime        @default(now())
+    updatedAt DateTime        @updatedAt
+}
+
+model BlastOrder {
+    id     String    @id @default(uuid())
+    userId String
+    user   BlastUser @relation(fields: [userId], references: [id])
+
+    planName String? // e.g., "FriendInvite", "Saas 1month", "Buy License"
+    quantity Int // 赠送的 quota (如果是 SaaS，可以是 0)
+    price    Float // 价格 (RM)
+
+    billplzInvoiceUrl String?
+    purchaseAt        DateTime @default(now())
+}
+
+model BlastUsageLog {
+    id             String    @id @default(uuid())
+    userId         String
+    user           BlastUser @relation(fields: [userId], references: [id])
+    requestedCount Int
+    actualSent     Int? // 实际发送成功数（可选）
+    allowed        Boolean
+    reason         String? // 拒绝原因
+    createdAt      DateTime  @default(now())
+
+    @@index([userId, createdAt])
+}
+
+enum BlastTier {
+    FREE
+    MONTHLY
+    YEARLY
+    LIFETIME
+}
+
+enum NoticeType {
+    MAIN_NOTICE
+    HOMEPAGE_NOTICE
+}
+
+model Notice {
+    id        String     @id @default(uuid())
+    type      NoticeType
+    title     String
+    content   String     @db.Text
+    isActive  Boolean    @default(true)
+    createdAt DateTime   @default(now())
+    updatedAt DateTime   @updatedAt
+
+    @@index([type, isActive])
+}
+
+enum CommunityPostType {
+    DISCUSSION
+    QUESTION
+    ANNOUNCEMENT
+    POLL
+    WISHPOOL
+}
+
+enum CommunityContentStatus {
+    ACTIVE
+    HIDDEN
+    DELETED
+    LOCKED
+}
+
+enum CommunityVoteTargetType {
+    POST
+    COMMENT
+}
+
+enum CommunityReportTargetType {
+    POST
+    COMMENT
+}
+
+enum CommunityReportStatus {
+    OPEN
+    REVIEWED
+    DISMISSED
+    ACTIONED
+}
+
+enum CommunityNotificationType {
+    POST_REPLY
+    COMMENT_REPLY
+    MENTION
+    MODERATION
+}
+
+enum CommunityModerationActionType {
+    HIDE
+    DELETE
+    RESTORE
+    LOCK
+    UNLOCK
+    PIN
+    UNPIN
+    REVIEW
+    BULK_DELETE
+    AI_FAQ_DRAFT
+    CREATE_FAQ
+}
+
+model CommunityPost {
+    id        String                 @id @default(uuid())
+    slug      String                 @unique
+    type      CommunityPostType      @default(DISCUSSION)
+    title     String
+    body      String                 @db.Text
+    author    User?                  @relation(fields: [authorId], references: [id], onDelete: SetNull)
+    authorId  String?
+    status    CommunityContentStatus @default(ACTIVE)
+    adminOnly Boolean                @default(false)
+    pinned    Boolean                @default(false)
+    locked    Boolean                @default(false)
+
+    score                     Int       @default(0)
+    upvoteCount               Int       @default(0)
+    downvoteCount             Int       @default(0)
+    commentCount              Int       @default(0)
+    viewCount                 Int       @default(0)
+    reportCount               Int       @default(0)
+    adminReviewedAt           DateTime?
+    adminReviewedByEmail      String?
+    adminReviewedCommentCount Int       @default(0)
+    adminReviewNote           String?   @db.Text
+    hotScore                  Float     @default(0)
+    lastActivityAt            DateTime  @default(now())
+
+    authorDisplayNameSnapshot String?
+    authorAvatarSnapshot      String?
+    authorRoleLabel           String?
+
+    deletedAt DateTime?
+    createdAt DateTime  @default(now())
+    updatedAt DateTime  @updatedAt
+
+    comments          CommunityComment[]
+    votes             CommunityVote[]
+    views             CommunityPostView[]
+    tags              CommunityPostTag[]
+    poll              CommunityPoll?
+    reports           CommunityReport[]
+    notifications     CommunityNotification[]
+    moderationActions CommunityModerationAction[]
+
+    @@index([status, type, createdAt])
+    @@index([adminOnly, status, type])
+    @@index([status, hotScore])
+    @@index([authorId, createdAt])
+    @@index([lastActivityAt])
+    @@index([adminReviewedAt])
+}
+
+model CommunityComment {
+    id       String             @id @default(uuid())
+    post     CommunityPost      @relation(fields: [postId], references: [id], onDelete: Cascade)
+    postId   String
+    parent   CommunityComment?  @relation("CommunityCommentReplies", fields: [parentId], references: [id], onDelete: SetNull)
+    parentId String?
+    replies  CommunityComment[] @relation("CommunityCommentReplies")
+    author   User?              @relation(fields: [authorId], references: [id], onDelete: SetNull)
+    authorId String?
+
+    body   String                 @db.Text
+    depth  Int                    @default(0)
+    path   String                 @default("")
+    status CommunityContentStatus @default(ACTIVE)
+
+    score         Int @default(0)
+    upvoteCount   Int @default(0)
+    downvoteCount Int @default(0)
+    replyCount    Int @default(0)
+    reportCount   Int @default(0)
+
+    authorDisplayNameSnapshot String?
+    authorAvatarSnapshot      String?
+    authorRoleLabel           String?
+
+    deletedAt DateTime?
+    createdAt DateTime  @default(now())
+    updatedAt DateTime  @updatedAt
+
+    votes             CommunityVote[]
+    reports           CommunityReport[]
+    notifications     CommunityNotification[]
+    moderationActions CommunityModerationAction[]
+
+    @@index([postId, parentId, createdAt])
+    @@index([postId, path])
+    @@index([authorId, createdAt])
+    @@index([status])
+}
+
+model CommunityPostView {
+    id               String        @id @default(uuid())
+    post             CommunityPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+    postId           String
+    user             User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+    userId           String?
+    anonymousKeyHash String?
+    viewerKey        String
+    createdAt        DateTime      @default(now())
+
+    @@unique([postId, viewerKey])
+    @@index([postId])
+    @@index([userId])
+    @@index([anonymousKeyHash])
+}
+
+model CommunityVote {
+    id               String                  @id @default(uuid())
+    user             User?                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+    userId           String?
+    anonymousKeyHash String?
+    targetType       CommunityVoteTargetType
+    post             CommunityPost?          @relation(fields: [postId], references: [id], onDelete: Cascade)
+    postId           String?
+    comment          CommunityComment?       @relation(fields: [commentId], references: [id], onDelete: Cascade)
+    commentId        String?
+    value            Int
+    createdAt        DateTime                @default(now())
+    updatedAt        DateTime                @updatedAt
+
+    @@unique([userId, postId])
+    @@unique([userId, commentId])
+    @@unique([anonymousKeyHash, postId])
+    @@unique([anonymousKeyHash, commentId])
+    @@index([postId])
+    @@index([commentId])
+    @@index([anonymousKeyHash])
+}
+
+model CommunityTag {
+    id          String   @id @default(uuid())
+    name        String
+    slug        String   @unique
+    description String?
+    color       String?
+    useCount    Int      @default(0)
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+
+    posts CommunityPostTag[]
+}
+
+model CommunityPostTag {
+    post   CommunityPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+    postId String
+    tag    CommunityTag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+    tagId  String
+
+    @@id([postId, tagId])
+    @@index([tagId])
+}
+
+model CommunityPoll {
+    id            String        @id @default(uuid())
+    post          CommunityPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+    postId        String        @unique
+    question      String
+    allowMultiple Boolean       @default(false)
+    expiresAt     DateTime?
+    createdAt     DateTime      @default(now())
+    updatedAt     DateTime      @updatedAt
+
+    options CommunityPollOption[]
+    votes   CommunityPollVote[]
+}
+
+model CommunityPollOption {
+    id        String        @id @default(uuid())
+    poll      CommunityPoll @relation(fields: [pollId], references: [id], onDelete: Cascade)
+    pollId    String
+    label     String
+    position  Int
+    voteCount Int           @default(0)
+    createdAt DateTime      @default(now())
+    updatedAt DateTime      @updatedAt
+
+    votes CommunityPollVote[]
+
+    @@unique([pollId, position])
+    @@index([pollId])
+}
+
+model CommunityPollVote {
+    id        String              @id @default(uuid())
+    poll      CommunityPoll       @relation(fields: [pollId], references: [id], onDelete: Cascade)
+    pollId    String
+    option    CommunityPollOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+    optionId  String
+    user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+    userId    String
+    createdAt DateTime            @default(now())
+
+    @@unique([pollId, userId])
+    @@index([optionId])
+    @@index([userId])
+}
+
+model CommunityReport {
+    id                   String                    @id @default(uuid())
+    reporter             User                      @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+    reporterId           String
+    targetType           CommunityReportTargetType
+    post                 CommunityPost?            @relation(fields: [postId], references: [id], onDelete: Cascade)
+    postId               String?
+    comment              CommunityComment?         @relation(fields: [commentId], references: [id], onDelete: Cascade)
+    commentId            String?
+    reason               String
+    message              String?                   @db.Text
+    status               CommunityReportStatus     @default(OPEN)
+    reviewedByAdminEmail String?
+    reviewedAt           DateTime?
+    adminNote            String?                   @db.Text
+    createdAt            DateTime                  @default(now())
+    updatedAt            DateTime                  @updatedAt
+
+    @@index([status, createdAt])
+    @@index([targetType, createdAt])
+    @@index([postId])
+    @@index([commentId])
+}
+
+model CommunityNotification {
+    id          String                    @id @default(uuid())
+    recipient   User                      @relation("CommunityNotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+    recipientId String
+    actor       User?                     @relation("CommunityNotificationActor", fields: [actorId], references: [id], onDelete: SetNull)
+    actorId     String?
+    type        CommunityNotificationType
+    post        CommunityPost?            @relation(fields: [postId], references: [id], onDelete: Cascade)
+    postId      String?
+    comment     CommunityComment?         @relation(fields: [commentId], references: [id], onDelete: Cascade)
+    commentId   String?
+    metadata    Json                      @default("{}")
+    readAt      DateTime?
+    createdAt   DateTime                  @default(now())
+
+    @@index([recipientId, readAt, createdAt])
+    @@index([recipientId, createdAt])
+    @@index([postId])
+    @@index([commentId])
+}
+
+model CommunityModerationAction {
+    id               String                        @id @default(uuid())
+    adminEmail       String
+    adminDisplayName String?
+    action           CommunityModerationActionType
+    targetType       String
+    post             CommunityPost?                @relation(fields: [postId], references: [id], onDelete: SetNull)
+    postId           String?
+    comment          CommunityComment?             @relation(fields: [commentId], references: [id], onDelete: SetNull)
+    commentId        String?
+    reason           String?                       @db.Text
+    metadata         Json                          @default("{}")
+    createdAt        DateTime                      @default(now())
+
+    @@index([adminEmail, createdAt])
+    @@index([action, createdAt])
+    @@index([postId])
+    @@index([commentId])
+}
+
+model CommunityFaqLink {
+    id                  String   @id @default(uuid())
+    faqId               Int
+    postId              String?
+    sourceCommentId     String?
+    adminReplyCommentId String?
+    createdByAdminEmail String
+    aiModel             String?
+    aiDraft             Json     @default("{}")
+    createdAt           DateTime @default(now())
+
+    @@index([faqId])
+    @@index([postId])
+    @@index([sourceCommentId])
+    @@index([adminReplyCommentId])
+    @@index([createdByAdminEmail, createdAt])
+}
+
+model CommunityRateLimitEvent {
+    id        String   @id @default(uuid())
+    userId    String?
+    ipHash    String?
+    action    String
+    createdAt DateTime @default(now())
+
+    @@index([userId, action, createdAt])
+    @@index([ipHash, action, createdAt])
+}
+
+model PropCopilotUser {
+    id                        String                 @id @default(uuid())
+    userAccId                 String                 @unique
+    userAcc                   UserAcc                @relation(fields: [userAccId], references: [id])
+    apiKey                    String                 @unique @default(uuid())
+    gmailEmail                String?
+    gmailName                 String?
+    gmailPicture              String?
+    gmailAccessTokenEnc       String?                @db.Text
+    gmailRefreshTokenEnc      String?                @db.Text
+    gmailScope                String?
+    gmailTokenType            String?
+    gmailAccessTokenExpiresAt DateTime?
+    gmailConnectedAt          DateTime?
+    gmailDisconnectedAt       DateTime?
+    gmailAuthSessionId        String?
+    gmailAuthState            String?                @unique
+    gmailAuthCodeVerifier     String?
+    gmailAuthStatus           String?
+    gmailAuthError            String?                @db.Text
+    gmailAuthRequestedAt      DateTime?
+    gmailAuthCompletedAt      DateTime?
+    aiRequests                PropCopilotAiRequest[]
+    subscriptions             PropCopilotSubscription[]
+    quotaPeriods              PropCopilotQuotaPeriod[]
+    usageLedgers              PropCopilotUsageLedger[]
+    createdAt                 DateTime               @default(now())
+    updatedAt                 DateTime               @updatedAt
+}
+
+enum PropCopilotPlanTier {
+    FREE_TRIAL
+    GOLD
+    PLUS
+    PRO
+}
+
+enum PropCopilotSubscriptionStatus {
+    TRIAL
+    ACTIVE
+    EXPIRED
+    CANCELLED
+    PAYMENT_PENDING
+}
+
+enum PropCopilotUsageKind {
+    AI_TOKEN
+    AUTOMATION_CREDIT
+}
+
+enum PropCopilotUsageStatus {
+    RESERVED
+    SETTLED
+    RELEASED
+    FAILED
+}
+
+enum PropCopilotAiRequestStatus {
+    PENDING
+    SUCCEEDED
+    FAILED
+}
+
+model PropCopilotSubscription {
+    id                String                         @id @default(uuid())
+    propCopilotUserId String
+    propCopilotUser   PropCopilotUser                @relation(fields: [propCopilotUserId], references: [id])
+    tier              PropCopilotPlanTier
+    status            PropCopilotSubscriptionStatus
+    startsAt          DateTime
+    endsAt            DateTime
+    purchasedMonths   Int                            @default(1)
+    priceCents        Int
+    currency          String                         @default("MYR")
+    billplzBillId     String?                        @unique
+    billplzInvoiceUrl String?
+    metadata          Json?
+    createdAt         DateTime                       @default(now())
+    updatedAt         DateTime                       @updatedAt
+
+    @@index([propCopilotUserId, status, endsAt])
+}
+
+model PropCopilotQuotaPeriod {
+    id                        String                 @id @default(uuid())
+    propCopilotUserId         String
+    propCopilotUser           PropCopilotUser        @relation(fields: [propCopilotUserId], references: [id])
+    subscriptionId            String?
+    tier                      PropCopilotPlanTier
+    periodStart               DateTime
+    periodEnd                 DateTime
+    aiTokenLimit              Int
+    aiTokenUsed               Int                    @default(0)
+    aiTokenReserved           Int                    @default(0)
+    automationCreditLimit     Int
+    automationCreditUsed      Int                    @default(0)
+    automationCreditReserved  Int                    @default(0)
+    createdAt                 DateTime               @default(now())
+    updatedAt                 DateTime               @updatedAt
+
+    @@unique([propCopilotUserId, periodStart, periodEnd])
+    @@index([propCopilotUserId, periodEnd])
+}
+
+model PropCopilotUsageLedger {
+    id                String                   @id @default(uuid())
+    propCopilotUserId String
+    propCopilotUser   PropCopilotUser          @relation(fields: [propCopilotUserId], references: [id])
+    quotaPeriodId     String?
+    kind              PropCopilotUsageKind
+    status            PropCopilotUsageStatus
+    amountReserved    Int                      @default(0)
+    amountSettled     Int                      @default(0)
+    idempotencyKey    String                   @unique
+    taskName          String
+    platformType      String?
+    platformAccountId String?
+    requestId         String?
+    metadata          Json?
+    createdAt         DateTime                 @default(now())
+    updatedAt         DateTime                 @updatedAt
+
+    @@index([propCopilotUserId, kind, createdAt])
+    @@index([taskName, createdAt])
+}
+
+model PropCopilotAiRequest {
+    id                   String                     @id @default(uuid())
+    requestId            String                     @unique
+    propCopilotUserId    String
+    propCopilotUser      PropCopilotUser            @relation(fields: [propCopilotUserId], references: [id])
+    taskName             String
+    modelTier            String
+    modelName            String
+    thinkingLevel        String?
+    status               PropCopilotAiRequestStatus @default(PENDING)
+    promptChars          Int                        @default(0)
+    contextChars         Int                        @default(0)
+    attachmentCount      Int                        @default(0)
+    imageCount           Int                        @default(0)
+    audioCount           Int                        @default(0)
+    otherAttachmentCount Int                        @default(0)
+    inputBytes           Int                        @default(0)
+    outputChars          Int                        @default(0)
+    promptTokens         Int?
+    candidateTokens      Int?
+    thoughtsTokens       Int?
+    totalTokens          Int?
+    durationMs           Int?
+    errorCode            String?
+    errorMessage         String?                    @db.Text
+    quotaLedgerId        String?
+    quotaPeriodId        String?
+    metadata             Json                       @default("{}")
+    completedAt          DateTime?
+    createdAt            DateTime                   @default(now())
+    updatedAt            DateTime                   @updatedAt
+
+    @@index([propCopilotUserId, createdAt])
+    @@index([status, createdAt])
+}
+
+model CasioAiSession {
+    id        String            @id @default(uuid())
+    deviceId  String
+    title     String?
+    status    String            @default("ACTIVE")
+    createdAt DateTime          @default(now())
+    updatedAt DateTime          @updatedAt
+    questions CasioAiQuestion[]
+
+    @@index([deviceId, updatedAt])
+    @@index([deviceId, status, updatedAt])
+}
+
+model CasioAiQuestion {
+    id               String           @id @default(uuid())
+    deviceId         String
+    questionNo       Int
+    sessionId        String?
+    session          CasioAiSession?  @relation(fields: [sessionId], references: [id])
+    displayOrder     Int              @default(0)
+    legacyQuestionNo Int?
+    mode             String?
+    modelHint        String?
+    createToken      String?
+    solveToken       String?
+    photoCount       Int              @default(0)
+    status           String           @default("PENDING")
+    contextTail      String?          @db.Text
+    answer           String?          @db.Text
+    displayText      String?          @db.Text
+    displayBlocks    Json             @default("[]")
+    errorMessage     String?          @db.Text
+    promptTokens     Int?
+    completionTokens Int?
+    totalTokens      Int?
+    completedAt      DateTime?
+    createdAt        DateTime         @default(now())
+    updatedAt        DateTime         @updatedAt
+    photos           CasioAiPhoto[]
+
+    @@unique([deviceId, questionNo])
+    @@unique([deviceId, createToken])
+    @@index([deviceId, createdAt])
+    @@index([deviceId, sessionId, displayOrder])
+    @@index([deviceId, status, updatedAt])
+    @@index([status, createdAt])
+}
+
+model CasioAiPhoto {
+    id          String          @id @default(uuid())
+    questionId  String
+    question    CasioAiQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+    deviceId    String
+    questionNo  Int
+    photoIndex  Int
+    uploadToken String?
+    blobUrl     String          @db.Text
+    blobPath    String
+    contentType String
+    sizeBytes   Int
+    sha256      String
+    createdAt   DateTime        @default(now())
+    updatedAt   DateTime        @updatedAt
+
+    @@unique([deviceId, questionNo, photoIndex])
+    @@unique([questionId, photoIndex])
+    @@unique([deviceId, uploadToken])
+    @@index([questionId, photoIndex])
+    @@index([deviceId, createdAt])
+}
+
+// ============================================
+// AdTable System (synced from local app)
+// ============================================
+
+model AdTable {
+    id        String        @id @default(uuid())
+    owner     User?         @relation(fields: [ownerId], references: [id])
+    ownerId   String?
+    name      String        @default("Untitled Table")
+    columns   TableColumn[]
+    rows      TableRow[]
+    cells     TableCell[]
+    createdAt DateTime      @default(now())
+    updatedAt DateTime      @updatedAt
+
+    // 标记数据来源
+    syncedFromLocal Boolean @default(true)
+    localTableId    String? // 原始 local table ID
+
+    @@index([ownerId])
+    @@index([localTableId])
+}
+
+model TableColumn {
+    id        String      @id @default(uuid())
+    table     AdTable     @relation(fields: [tableId], references: [id], onDelete: Cascade)
+    tableId   String
+    title     String
+    type      String      @default("TEXT")
+    config    Json        @default("{}")
+    position  Int
+    isPrimary Boolean     @default(false)
+    cells     TableCell[]
+    createdAt DateTime    @default(now())
+    updatedAt DateTime    @updatedAt
+
+    localColumnId String? // 原始 local column ID
+
+    @@unique([tableId, position])
+    @@index([tableId])
+    @@index([localColumnId])
+}
+
+model TableRow {
+    id        String      @id @default(uuid())
+    table     AdTable     @relation(fields: [tableId], references: [id], onDelete: Cascade)
+    tableId   String
+    title     String      @default("")
+    order     Int         @default(0)
+    cells     TableCell[]
+    createdAt DateTime    @default(now())
+    updatedAt DateTime    @updatedAt
+
+    localRowId             String?
+    localDirectoryHandleId String?
+    selectedImageOrder     Json    @default("[]")
+    platformFormData       Json    @default("{}")
+    sharedPhotoPreviews    Json    @default("{}")
+
+    @@index([tableId])
+    @@index([localRowId])
+}
+
+model TableCell {
+    id        String      @id @default(uuid())
+    table     AdTable     @relation(fields: [tableId], references: [id], onDelete: Cascade)
+    tableId   String
+    row       TableRow    @relation(fields: [rowId], references: [id], onDelete: Cascade)
+    rowId     String
+    column    TableColumn @relation(fields: [columnId], references: [id], onDelete: Cascade)
+    columnId  String
+    value     Json        @default("{}")
+    createdAt DateTime    @default(now())
+    updatedAt DateTime    @updatedAt
+
+    localCellId String?
+
+    @@unique([rowId, columnId])
+    @@index([tableId])
+    @@index([localCellId])
+}
+
+/**
+ * --------------------------
+ * Team / Collaboration models
+ * --------------------------
+ */
+
+enum TeamRole {
+    LEADER
+    CO_LEADER
+    MEMBER
+}
+
+model Team {
+    id                String             @id @default(uuid())
+    name              String
+    bio               String?
+    members           TeamMember[]
+    tableShareMembers TableShareMember[]
+    createdAt         DateTime           @default(now())
+    updatedAt         DateTime           @updatedAt
+    RowShareMember    RowShareMember[]
+}
+
+model TeamMember {
+    id        String   @id @default(uuid())
+    team      Team     @relation(fields: [teamId], references: [id])
+    teamId    String
+    user      User?    @relation(fields: [userId], references: [id])
+    userId    String?
+    email     String
+    name      String?
+    role      TeamRole @default(MEMBER)
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@unique([teamId, email])
+    @@index([teamId])
+}
+
+/**
+ * --------------------------
+ * Share System
+ * --------------------------
+ */
+
+// Add to schema.prisma
+enum ShareRole {
+    FULL
+    EDITOR
+    VIEWER
+}
+
+model TableShare {
+    id          String             @id @default(uuid())
+    tableId     String             @unique
+    createdBy   User?              @relation(fields: [createdById], references: [id])
+    createdById String?
+    createdAt   DateTime           @default(now())
+    members     TableShareMember[]
+}
+
+model TableShareMember {
+    id        String     @id @default(uuid())
+    share     TableShare @relation(fields: [shareId], references: [id])
+    shareId   String
+    user      User?      @relation(fields: [userId], references: [id])
+    userId    String?
+    team      Team?      @relation(fields: [teamId], references: [id])
+    teamId    String?
+    role      String     @default("VIEWER")
+    email     String?
+    createdAt DateTime   @default(now())
+    updatedAt DateTime   @updatedAt
+}
+
+model RowShare {
+    id          String   @id @default(uuid())
+    tableId     String
+    rowId       String
+    createdBy   User?    @relation(fields: [createdById], references: [id])
+    createdById String? // who created this rowShare
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+
+    members RowShareMember[] // <--- 不要在这里写 fields/references
+
+    @@unique([tableId, rowId]) // 复合唯一，便于 findUnique by pair
+    @@index([tableId])
+    @@index([rowId])
+}
+
+model RowShareMember {
+    id        String   @id @default(uuid())
+    share     RowShare @relation(fields: [shareId], references: [id]) // 多端写 fields/references
+    shareId   String
+    user      User?    @relation(fields: [userId], references: [id])
+    userId    String? // direct user
+    team      Team?    @relation(fields: [teamId], references: [id])
+    teamId    String? // team share
+    email     String? // invited email (lowercased)
+    role      String   @default("VIEWER") // 或者改成 ShareRole enum (见下)
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([shareId])
+    @@index([userId])
+    @@index([teamId])
+    @@index([email])
+}

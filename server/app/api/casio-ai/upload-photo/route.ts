@@ -8,6 +8,7 @@ import {
 import { put } from "@vercel/blob";
 import { createHash, randomUUID } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
+import sharp from "sharp";
 
 export async function POST(request: NextRequest) {
     try {
@@ -49,9 +50,15 @@ export async function POST(request: NextRequest) {
             );
         }
 
+        // Device v2 camera is mounted 90 degrees counter-clockwise; normalize uploads server-side.
+        const photoBuffer = await sharp(bodyBuffer)
+            .rotate(90)
+            .jpeg({ quality: 92, mozjpeg: true })
+            .toBuffer();
+
         const now = new Date();
         const dateSegment = now.toISOString().slice(0, 10);
-        const hash = createHash("sha256").update(bodyBuffer).digest("hex");
+        const hash = createHash("sha256").update(photoBuffer).digest("hex");
         const fileName = `${questionNo}-${photoIndex}-${randomUUID()}.jpg`;
         const blobPath = [
             "casio-ai",
@@ -62,7 +69,7 @@ export async function POST(request: NextRequest) {
             fileName
         ].join("/");
 
-        const uploadResult = await put(blobPath, bodyBuffer, {
+        const uploadResult = await put(blobPath, photoBuffer, {
             access: "public",
             addRandomSuffix: false,
             contentType: "image/jpeg"
@@ -82,6 +89,15 @@ export async function POST(request: NextRequest) {
             },
             update: {
                 status: "PENDING",
+                mode: null,
+                modelHint: null,
+                contextTail: null,
+                answer: null,
+                displayText: null,
+                displayBlocks: [],
+                promptTokens: null,
+                completionTokens: null,
+                totalTokens: null,
                 completedAt: null,
                 errorMessage: null
             }
@@ -103,7 +119,7 @@ export async function POST(request: NextRequest) {
                 blobUrl: uploadResult.url,
                 blobPath,
                 contentType: "image/jpeg",
-                sizeBytes: bodyBuffer.length,
+                sizeBytes: photoBuffer.length,
                 sha256: hash
             },
             update: {
@@ -111,7 +127,7 @@ export async function POST(request: NextRequest) {
                 blobUrl: uploadResult.url,
                 blobPath,
                 contentType: "image/jpeg",
-                sizeBytes: bodyBuffer.length,
+                sizeBytes: photoBuffer.length,
                 sha256: hash
             }
         });
